@@ -267,7 +267,7 @@ else
     info "Atualizando sistema e instalando dependências..."
     echo
     apt-get update && apt-get upgrade -y
-    apt-get install -y curl unzip wget
+    apt-get install -y unzip wget
     ckpt_done "apt_update" "Atualização do sistema"
 fi
 
