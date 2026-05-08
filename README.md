@@ -25,7 +25,7 @@ Desenvolvido por [SEESTEC — Engenharia e Tecnologia](https://github.com/raphae
 | Requisito                    | Versão mínima                                          |
 |------------------------------|--------------------------------------------------------|
 | Sistema operacional          | Ubuntu **24.04 LTS**                                   |
-| Usuário com permissão `sudo` | —                                                      |
+| Usuário com permissão `sudo` | Principal usuário do host                              |
 | Sessão gráfica               | **X11 (Xorg)** — Wayland não é suportado para gravação |
 | Conexão com a internet       | Necessário conexão estável com permissão do firewall   |
 
@@ -53,6 +53,8 @@ axxon_linux_install/
 ```bash
 wget -v -O ~/axxon_linux_install.sh https://bit.ly/axxon_linux_install && sudo bash ~/axxon_linux_install.sh
 ```
+
+> O script requer `sudo` para instalar pacotes e configurar repositórios.
 
 ---
 
@@ -90,18 +92,6 @@ wget -v -O ~/axxon_linux_install.sh https://bit.ly/axxon_linux_install && sudo b
 | Client | 2.0    | 2.0.14.79 | ~1,1 GB |
 | Server | 3.0    | 3.0.0.46  | ~1,5 GB |
 | Client | 3.0    | 3.0.0.46  | ~1,6 GB |
-
-### Como executar
-
-```bash
-# Dar permissão de execução (se ainda não tiver)
-chmod +x install.sh
-
-# Executar
-sudo bash install.sh
-```
-
-> O script requer `sudo` para instalar pacotes e configurar repositórios.
 
 ### Retomada automática de instalação
 
@@ -150,6 +140,26 @@ Retomar instalação? [S/N ou qualquer outra tecla para sair]:
 
 O checkpoint é **removido automaticamente** ao final de uma instalação bem-sucedida.
 
+### Log de instalação
+
+Todo o output do instalador (stdout + stderr) é gravado em tempo real em:
+
+```
+/var/tmp/axxon_install.log
+```
+
+O arquivo persiste após a instalação e pode ser consultado para auditoria ou diagnóstico:
+
+```bash
+cat /var/tmp/axxon_install.log                          # histórico completo
+tail -f /var/tmp/axxon_install.log                      # acompanhar em tempo real
+grep -E "\[✓\]|ERRO|encerrada" /var/tmp/axxon_install.log  # filtrar resultados
+```
+
+O log registra o timestamp de início, toda a saída de cada etapa e um rodapé com o código de saída ao encerrar (sucesso, erro ou cancelamento pelo usuário).
+
+> O arquivo **não é removido** pelo instalador ao final — o `ckpt_clear` remove apenas o checkpoint e os pacotes temporários em `/var/tmp/axxon_install/`.
+
 ### Fluxo interativo
 
 ```
@@ -170,7 +180,9 @@ Em cada etapa de confirmação:
 
 ### Aliases instalados no `~/.bashrc`
 
-Após a instalação, os seguintes comandos ficam disponíveis (reinicie o terminal):
+Após a instalação, os seguintes comandos ficam disponíveis (reinicie o terminal).
+
+> A cada login, o terminal exibe automaticamente o status do serviço Axxon One e uma tabela de referência com todos os aliases disponíveis agrupados por seção.
 
 **Axxon One — serviço**
 ```bash
