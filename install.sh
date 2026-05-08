@@ -329,6 +329,52 @@ echo "
 --------- IPV4: \$(hostname -I)
 --------- HOST:
 \$(hostnamectl)
+\$(sudo systemctl status axxon-one)
+
+# ── SEESTEC - ENGENHARIA E TECNOLOGIA ─────────────────────────────────────────
+
+# Axxon One — controle do serviço
+  axxon-start              # inicia o serviço Axxon One
+  axxon-stop               # para o serviço Axxon One
+  axxon-restart            # reinicia o serviço Axxon One
+  axxon-status             # exibe status do serviço Axxon One
+
+# Identificação e busca de gravações
+  ask-tag                  # identifica câmera/tag de uma gravação
+  find-rec                 # busca gravações por data e hora
+
+# screenREC — controle
+  screenREC-start          # inicia gravação de tela em segundo plano
+  screenREC-stop           # encerra a gravação de tela
+  screenREC-status         # mostra se há gravação ativa
+  screenREC-live           # acompanha o log em tempo real
+
+# screenREC — log de arquivamento (zip_daily)
+  screenREC-log            # exibe o log de arquivamento
+  screenREC-show           # acompanha o log de arquivamento em tempo real
+  screenREC-ok             # filtra entradas de sucesso no log
+  screenREC-error          # filtra erros no log de arquivamento
+
+# screenREC — diagnóstico
+  screenREC-session        # exibe tipo de sessão gráfica (X11/Wayland)
+  screenREC-monitors       # lista monitores disponíveis
+  screenREC-audio          # exibe informações do servidor de áudio
+  screenREC-audio-list     # lista fontes de áudio disponíveis
+  screenREC-audio-test     # grava 5s de áudio para teste
+  screenREC-serial         # exibe serial DMI e machine-id
+  screenREC-folder         # lista arquivos na pasta de gravações
+  screenREC-autostart      # exibe configuração de autostart
+  screenREC-cron           # exibe crons registrados para screenREC
+  screenREC-disk           # mostra espaço em disco da pasta de gravações
+  screenREC-cleanup-log    # exibe log de limpeza de gravações antigas
+  screenREC-cleanup-show   # acompanha log de limpeza em tempo real
+
+# Samba — controle e diagnóstico
+  samba-status             # exibe status dos serviços Samba
+  samba-restart            # reinicia os serviços Samba
+  samba-users              # lista usuários Samba
+  samba-passwd             # altera senha Samba do usuário atual
+  samba-test               # testa conexão Samba local
 "
 BASHRC
     fi
