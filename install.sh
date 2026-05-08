@@ -39,6 +39,7 @@ CKPT_FILE="/var/tmp/axxon_install.checkpoint"
 INSTALL_DIR="/var/tmp/axxon_install"
 ZIP_FILE="$INSTALL_DIR/axxon-one.zip"
 PKG_DIR="$INSTALL_DIR/axxon"
+LOG_FILE="/var/tmp/axxon_install.log"
 
 # Grava ou atualiza uma chave no checkpoint (operação atômica via tmp)
 ckpt_set() {
@@ -142,6 +143,12 @@ checkConnection() {
     done
     return 0;
 }
+
+# ── log de instalação ─────────────────────────────────────────────────────────
+mkdir -p "$(dirname "$LOG_FILE")"
+exec > >(tee -a "$LOG_FILE") 2>&1
+trap 'printf "\n[%s] === Instalação encerrada (exit: %s) ===\n" "$(date +"%F %T")" "$?"' EXIT
+printf '[%s] === Instalação iniciada ===\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
 
 checkConnection;
 
@@ -716,6 +723,9 @@ echo
 
 # Remove checkpoint e diretório temporário após instalação bem-sucedida
 ckpt_clear
+
+info "Log completo salvo em: $LOG_FILE"
+echo
 
 for ((t = 10 ; t > 0 ; t--)); do
     s=$([[ $t -gt 1 ]] && echo 's' || echo '')
