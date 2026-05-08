@@ -1,12 +1,24 @@
 #!/bin/bash
 set -uo pipefail
 
-# cleanup_old.sh — Remove arquivos .zip de gravação com mais de 45 dias
+# cleanup_old.sh — Remove arquivos .zip de gravação com mais de N dias
+# O período de retenção é configurável e salvo em ~/screenREC/.cleanup_days.
 # Executado automaticamente pelo cron às 05:00 (horário do host).
 # Registrado automaticamente pelo screenREC.sh na 1ª execução.
 #
 # ══════════════════════════════════════════════════════════════════════════════
-# CONFIGURAÇÃO DO CRON — REFERÊNCIA
+# CONFIGURAÇÃO DO PERÍODO DE RETENÇÃO
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Definir/alterar o período de retenção a qualquer momento:
+#   screenREC-cleanup-config
+#   bash ~/screenREC/cleanup_old.sh --config
+#
+# Arquivo de configuração:
+#   ~/screenREC/.cleanup_days   (número inteiro de dias)
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# CRON — REFERÊNCIA
 # ══════════════════════════════════════════════════════════════════════════════
 #
 # Entrada criada pelo screenREC.sh:
@@ -25,7 +37,6 @@ set -uo pipefail
 #
 # ══════════════════════════════════════════════════════════════════════════════
 
-MAX_DAYS=45      # dias de retenção dos arquivos .zip
 WARN_USAGE=85    # % de uso do disco que aciona alerta no log
 LOG="/tmp/screenrec_cleanup.log"
 
@@ -33,6 +44,60 @@ _log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG";
 
 # Resolve home via UID — $HOME e $USER não são confiáveis no contexto do cron
 HOME_DIR=$(getent passwd "$(id -u)" | cut -d: -f6)
+CONFIG_FILE="$HOME_DIR/screenREC/.cleanup_days"
+
+# ── configuração de retenção ──────────────────────────────────────────────────
+
+# Lê o número de dias do arquivo de configuração; retorna 45 se ausente/inválido
+_read_days() {
+    local val
+    val=$(cat "$CONFIG_FILE" 2>/dev/null)
+    if [[ "$val" =~ ^[0-9]+$ ]] && (( val > 0 )); then
+        echo "$val"
+    else
+        echo "45"
+    fi
+}
+
+# Prompt interativo — define e salva o período de retenção
+_configure() {
+    local current new_val
+    current=$(_read_days)
+    echo
+    printf '  Retenção atual : %s dias\n' "$current"
+    printf '  Novo valor em dias (Enter para manter %s): ' "$current"
+    read -r new_val || true
+    new_val="${new_val:-$current}"
+    while ! [[ "$new_val" =~ ^[0-9]+$ ]] || (( new_val <= 0 )); do
+        printf '  Valor inválido. Digite um número inteiro maior que zero (Enter = %s): ' "$current"
+        read -r new_val || true
+        new_val="${new_val:-$current}"
+    done
+    echo "$new_val" > "$CONFIG_FILE"
+    echo
+    printf '  [✓] Retenção configurada: %s dias.\n' "$new_val"
+    printf '      Para alterar depois:   screenREC-cleanup-config\n'
+    echo
+}
+
+# ── modo --config: reconfigura e sai ─────────────────────────────────────────
+if [[ "${1:-}" == "--config" ]]; then
+    _configure
+    exit 0
+fi
+
+# ── determinar MAX_DAYS ───────────────────────────────────────────────────────
+if [[ -f "$CONFIG_FILE" ]]; then
+    MAX_DAYS=$(_read_days)
+elif [[ -t 0 ]]; then
+    printf '\n  Primeira execução do cleanup — defina o período de retenção dos arquivos .zip:\n'
+    _configure
+    MAX_DAYS=$(_read_days)
+else
+    MAX_DAYS=45
+    _log "AVISO: configuração não encontrada; usando padrão de $MAX_DAYS dias."
+    _log "AVISO: execute 'screenREC-cleanup-config' para definir o período desejado."
+fi
 
 # Determinar REC_BASE: lê path do smb.conf se disponível; fallback para ~/REC_SHARE
 _rec_base() {
