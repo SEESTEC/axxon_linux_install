@@ -112,6 +112,7 @@ ckpt_show_status() {
     _ckpt_row setup_repo       "Repositório e chave GPG"
     _ckpt_row install_pkgs     "Instalação dos pacotes .deb"
     _ckpt_row download_scripts "Scripts screenREC"          "client"
+    _ckpt_row cleanup_config   "Retenção de gravações"      "client"
     _ckpt_row setup_autostart  "Autostart screenREC"        "client"
     _ckpt_row setup_samba      "Servidor Samba"             "client"
     _ckpt_row save_sudo_pass   "Credencial sudo"            "client"
@@ -317,6 +318,9 @@ alias screenREC-disk="df -h \$HOME/REC_SHARE"
 alias screenREC-cleanup-log="cat /tmp/screenrec_cleanup.log"
 alias screenREC-cleanup-show="tail -f /tmp/screenrec_cleanup.log"
 
+# screenREC — configuração
+alias screenREC-cleanup-config="bash \$HOME/screenREC/cleanup_old.sh --config"
+
 # Samba — controle e diagnóstico
 alias samba-status="systemctl status smbd nmbd"
 alias samba-restart="sudo systemctl restart smbd nmbd"
@@ -368,6 +372,9 @@ echo "
   screenREC-disk           # mostra espaço em disco da pasta de gravações
   screenREC-cleanup-log    # exibe log de limpeza de gravações antigas
   screenREC-cleanup-show   # acompanha log de limpeza em tempo real
+
+# screenREC — configuração
+  screenREC-cleanup-config # define o período de retenção das gravações (.zip)
 
 # Samba — controle e diagnóstico
   samba-status             # exibe status dos serviços Samba
@@ -720,6 +727,16 @@ if [[ "$type" == "client" ]]; then
     else
         download_scripts
         ckpt_done "download_scripts" "Scripts screenREC"
+    fi
+
+    if ckpt_is_done "cleanup_config"; then
+        ckpt_skip "cleanup_config" "Retenção de gravações"
+    else
+        real_user="${SUDO_USER:-$USER}"
+        real_home=$(getent passwd "$real_user" | cut -d: -f6)
+        info "Configurando período de retenção das gravações..."
+        sudo -u "$real_user" bash "$real_home/screenREC/cleanup_old.sh" --config
+        ckpt_done "cleanup_config" "Retenção de gravações"
     fi
 
     if ckpt_is_done "setup_autostart"; then
