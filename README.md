@@ -230,6 +230,11 @@ screenREC-cleanup-log      # histórico completo do log de limpeza (cleanup_old)
 screenREC-cleanup-show     # acompanha o log de limpeza em tempo real
 ```
 
+**screenREC — configuração**
+```bash
+screenREC-cleanup-config  # define o período de retenção dos arquivos .zip (cleanup_old)
+```
+
 **Samba — controle e diagnóstico**
 ```bash
 samba-status   # status dos serviços smbd e nmbd
@@ -712,9 +717,15 @@ screenREC-folder   # lista as pastas existentes em REC_SHARE
 O script `cleanup_old.sh` gerencia o espaço em disco automaticamente — não é necessária nenhuma intervenção manual.
 
 - Executa todos os dias às **05:00** via cron (registrado automaticamente pelo `screenREC.sh` na primeira execução)
-- Remove todos os arquivos `.zip` com **mais de 45 dias** dentro de `REC_SHARE`
+- Remove arquivos `.zip` com mais de **N dias** dentro de `REC_SHARE` (N é configurável pelo usuário)
 - Emite um **alerta no log** se o uso do disco permanecer acima de **85%** após a limpeza
 - Se houver sessão gráfica ativa (`$DISPLAY`), exibe também uma notificação de área de trabalho via `notify-send`
+
+O período de retenção é definido durante a instalação e salvo em `~/screenREC/.cleanup_days`. Para alterar:
+
+```bash
+screenREC-cleanup-config  # abre prompt interativo para redefinir o período de retenção
+```
 
 ```bash
 screenREC-cleanup-log    # histórico completo do log de limpeza
