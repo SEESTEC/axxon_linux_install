@@ -700,8 +700,14 @@ disable_external_network() {
         return 0
     fi
 
+    # desabilita a interface de rede
     nmcli connection modify "$nm_conn" connection.autoconnect no
     nmcli connection down "$nm_conn" 2>/dev/null || true
+
+    # desabilita a rota de conexão
+    sudo ip route del default
+    # habilita a rota de conexão
+    # sudo ip route add default via "$(ip route | grep default | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')"
 
     grn "  Interface $ext_iface ('$nm_conn') → desconectada / autoconnect desabilitado"
     echo
