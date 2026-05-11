@@ -153,17 +153,9 @@ printf '[%s] === Instalação iniciada ===\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
 
 checkConnection;
 
-# ── verificação de SO ─────────────────────────────────────────────────────────
+# ── leitura de SO (verificação adiada — depende da versão escolhida) ──────────
 os_id=$(grep '^ID=' /etc/os-release | cut -d= -f2)
 os_version=$(grep '^VERSION_ID=' /etc/os-release | tr -d '"' | cut -d= -f2)
-
-if [[ "$os_id" != "ubuntu" || "$os_version" != "24.04" ]]; then
-    echo
-    red "Sistema operacional incompatível: $os_id $os_version"
-    echo "  Este script requer Ubuntu 24.04 LTS."
-    echo
-    exit 1
-fi
 
 # ── leitura / retomada de checkpoint ─────────────────────────────────────────
 type=""
@@ -246,6 +238,16 @@ if [[ "$_resuming" == false ]]; then
     mkdir -p "$INSTALL_DIR"
     ckpt_set "TYPE"    "$type"
     ckpt_set "VERSION" "$version"
+fi
+
+# ── verificação de SO por versão ──────────────────────────────────────────────
+required_os="$( [[ "$version" == "2.0" ]] && echo "20.04" || echo "24.04" )"
+if [[ "$os_id" != "ubuntu" || "$os_version" != "$required_os" ]]; then
+    echo
+    red "Sistema operacional incompatível: $os_id $os_version"
+    echo "  Axxon One $version requer Ubuntu ${required_os} LTS."
+    echo
+    exit 1
 fi
 
 # ── URLs de download ──────────────────────────────────────────────────────────
