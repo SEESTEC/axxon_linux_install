@@ -466,17 +466,26 @@ predownload_deps() {
     # Desempacota os .deb — vai falhar na configuração mas registra as deps no dpkg
     dpkg -i "${all_debs[@]}" 2>/dev/null || true
 
+    # Coloca os pacotes axxon em hold ANTES do apt-get para que ele não tente
+    # "corrigir" os pacotes em estado unconfigured baixando a versão 3.0 do repo
+    # (--no-upgrade não é suficiente pois unconfigured não é visto como "instalado")
+    local pkg_name
+    local -a axxon_pkg_names=()
+    for deb in "${all_debs[@]}"; do
+        pkg_name=$(dpkg-deb --field "$deb" Package 2>/dev/null) || continue
+        apt-mark hold "$pkg_name" 2>/dev/null || true
+        axxon_pkg_names+=("$pkg_name")
+    done
+
     # Baixa apenas as deps faltantes para o cache local sem instalar nem atualizar
     apt-get install -fy \
         --download-only \
         --no-upgrade \
         2>/dev/null || true
 
-    # Extrai os nomes dos pacotes axxon e purga o estado parcial do dpkg
-    # para que a instalação offline parta de um estado limpo
-    local pkg_name
-    for deb in "${all_debs[@]}"; do
-        pkg_name=$(dpkg-deb --field "$deb" Package 2>/dev/null) || continue
+    # Remove o hold e purga o estado parcial do dpkg
+    for pkg_name in "${axxon_pkg_names[@]}"; do
+        apt-mark unhold "$pkg_name" 2>/dev/null || true
         dpkg --purge --force-remove-reinstreq "$pkg_name" 2>/dev/null || true
     done
 
