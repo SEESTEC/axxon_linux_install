@@ -674,6 +674,11 @@ SVCEOF
     echo
 }
 
+# Estado salvo por disable_external_network para uso posterior pelo enable
+_disabled_iface=""
+_disabled_conn=""
+_disabled_gw=""
+
 # ── desabilitar rede externa (DHCP) ──────────────────────────────────────────
 disable_external_network() {
     info "Removendo conexão de rede externa (DHCP)..."
@@ -702,28 +707,77 @@ disable_external_network() {
         return 0
     fi
 
-    # desabilita a interface de rede
+    # Captura o gateway ANTES de remover a rota (necessário para restauração)
+    local gw
+    gw=$(ip route get 8.8.8.8 2>/dev/null \
+        | awk '{for(i=1;i<=NF;i++) if($i=="via") {print $(i+1); exit}}')
+
+    # Persiste o estado para enable_external_network
+    _disabled_iface="$ext_iface"
+    _disabled_conn="$nm_conn"
+    _disabled_gw="$gw"
+
     nmcli connection modify "$nm_conn" connection.autoconnect no
     nmcli connection down "$nm_conn" 2>/dev/null || true
-
-    # desabilita a rota de conexão
-    sudo ip route del default
-    # habilita a rota de conexão
-    # sudo ip route add default via "$(ip route | grep default | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')"
+    ip route del default 2>/dev/null || true
 
     grn "  Interface $ext_iface ('$nm_conn') → desconectada / autoconnect desabilitado"
     echo
+}
+
+# ── habilitar rede externa ────────────────────────────────────────────────────
+enable_external_network() {
+    if [[ -z "$_disabled_conn" ]]; then
+        warn "  Nenhuma conexão foi desabilitada nesta sessão. Nada a restaurar."
+        return 0
+    fi
+
+    info "Restaurando conexão de rede externa ('$_disabled_conn' / $_disabled_iface)..."
+    echo
+
+    # Reabilita reconexão automática
+    nmcli connection modify "$_disabled_conn" connection.autoconnect yes 2>/dev/null || true
+
+    # Sobe a interface via NetworkManager
+    if ! nmcli connection up "$_disabled_conn" 2>/dev/null; then
+        warn "  nmcli não ativou '$_disabled_conn'. Tentando restauração manual..."
+        ip link set "$_disabled_iface" up 2>/dev/null || true
+        if [[ -n "$_disabled_gw" ]]; then
+            ip route add default via "$_disabled_gw" dev "$_disabled_iface" 2>/dev/null || true
+        fi
+    fi
+
+    # Aguarda conectividade (até ~30 s)
+    local attempt=0
+    while ! ping -c 1 -W 2 8.8.8.8 &>/dev/null; do
+        ((attempt++))
+        if [[ $attempt -ge 15 ]]; then
+            red "  Sem conectividade após restaurar '$_disabled_conn'. Verifique a rede manualmente."
+            return 1
+        fi
+        sleep 2
+    done
+
+    grn "  Interface '$_disabled_conn' restaurada e conectividade confirmada."
+    echo
+
+    # Limpa estado
+    _disabled_iface=""
+    _disabled_conn=""
+    _disabled_gw=""
 }
 
 # ── passo: instalação dos pacotes .deb ───────────────────────────────────────
 if ckpt_is_done "install_pkgs"; then
     ckpt_skip "install_pkgs" "Instalação dos pacotes .deb"
 else
+    disable_external_network
     if [[ "$type" == "server" ]]; then
         install_server_pkgs "$PKG_DIR"
     elif [[ "$type" == "client" ]]; then
         install_client_pkgs "$PKG_DIR"
     fi
+    enable_external_network
     ckpt_done "install_pkgs" "Instalação dos pacotes .deb"
 fi
 
