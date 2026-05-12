@@ -693,37 +693,34 @@ disable_external_network() {
         return 0
     fi
 
-    if ! command -v nmcli &>/dev/null; then
-        red "  nmcli não encontrado. Desabilite manualmente a interface $ext_iface."
-        return 0
-    fi
-
-    local nm_conn
-    nm_conn=$(nmcli -t -f NAME,DEVICE connection show --active \
-        | awk -F: -v iface="$ext_iface" '$2==iface {print $1; exit}')
-
-    if [[ -z "$nm_conn" ]]; then
-        info "  Interface $ext_iface não gerenciada pelo NetworkManager. Nada a fazer."
-        return 0
-    fi
-
     # Captura o gateway ANTES de remover a rota (necessário para restauração)
     local gw
     gw=$(ip route get 8.8.8.8 2>/dev/null \
         | awk '{for(i=1;i<=NF;i++) if($i=="via") {print $(i+1); exit}}')
 
-    # Persiste o estado para enable_external_network
     _disabled_iface="$ext_iface"
-    _disabled_conn="$nm_conn"
     _disabled_gw="$gw"
 
     # Remove a rota default imediatamente — antes que o NM possa reagir
     sudo ip route del default 2>/dev/null || true
-    # Desgerencia o device para o NM não re-adicionar a rota automaticamente
-    sudo nmcli device set "$ext_iface" managed no 2>/dev/null || true
 
-    sudo nmcli connection modify "$nm_conn" connection.autoconnect no
-    sudo nmcli connection down "$nm_conn" 2>/dev/null || true
+    # Tenta desabilitar via nmcli se disponível
+    if command -v nmcli &>/dev/null; then
+        local nm_conn
+        nm_conn=$(nmcli -t -f NAME,DEVICE connection show --active \
+            | awk -F: -v iface="$ext_iface" '$2==iface {print $1; exit}')
+
+        if [[ -n "$nm_conn" ]]; then
+            _disabled_conn="$nm_conn"
+            sudo nmcli device set "$ext_iface" managed no 2>/dev/null || true
+            sudo nmcli connection modify "$nm_conn" connection.autoconnect no 2>/dev/null || true
+            sudo nmcli connection down "$nm_conn" 2>/dev/null || true
+        else
+            warn "  Interface $ext_iface não gerenciada pelo NetworkManager."
+        fi
+    else
+        warn "  nmcli não encontrado. Rota removida via ip route."
+    fi
 
     # Verifica se a rede externa foi de fato desabilitada
     local i=1
@@ -739,33 +736,34 @@ disable_external_network() {
     done
     echo
 
-    grn "  Interface $ext_iface ('$nm_conn') → desconectada / autoconnect desabilitado"
+    grn "  Interface $ext_iface → desconectada"
     echo
 }
 
 # ── habilitar rede externa ────────────────────────────────────────────────────
 enable_external_network() {
-    if [[ -z "$_disabled_conn" ]]; then
-        warn "  Nenhuma conexão foi desabilitada nesta sessão. Nada a restaurar."
+    if [[ -z "$_disabled_iface" ]]; then
+        warn "  Nenhuma interface foi desabilitada nesta sessão. Nada a restaurar."
         return 0
     fi
 
-    info "Restaurando conexão de rede externa ('$_disabled_conn' / $_disabled_iface)..."
+    info "Restaurando conexão de rede externa ('${_disabled_conn:-$_disabled_iface}')..."
     echo
 
-    # Reabilita reconexão automática
-    sudo nmcli connection modify "$_disabled_conn" connection.autoconnect yes 2>/dev/null || true
+    if command -v nmcli &>/dev/null && [[ -n "$_disabled_conn" ]]; then
+        # Reabilita reconexão automática e devolve o device ao NM
+        sudo nmcli connection modify "$_disabled_conn" connection.autoconnect yes 2>/dev/null || true
+        sudo nmcli device set "$_disabled_iface" managed yes 2>/dev/null || true
 
-    # Devolve o device ao controle do NM antes de subir a conexão
-    sudo nmcli device set "$_disabled_iface" managed yes 2>/dev/null || true
-
-    # Sobe a interface via NetworkManager
-    if ! sudo nmcli connection up "$_disabled_conn" 2>/dev/null; then
-        warn "  nmcli não ativou '$_disabled_conn'. Tentando restauração manual..."
-        sudo ip link set "$_disabled_iface" up 2>/dev/null || true
-        if [[ -n "$_disabled_gw" ]]; then
-            sudo ip route add default via "$_disabled_gw" dev "$_disabled_iface" 2>/dev/null || true
+        if ! sudo nmcli connection up "$_disabled_conn" 2>/dev/null; then
+            warn "  nmcli não ativou '$_disabled_conn'. Tentando restauração manual..."
+            sudo ip link set "$_disabled_iface" up 2>/dev/null || true
+            [[ -n "$_disabled_gw" ]] && sudo ip route add default via "$_disabled_gw" dev "$_disabled_iface" 2>/dev/null || true
         fi
+    else
+        # Restauração manual sem nmcli
+        sudo ip link set "$_disabled_iface" up 2>/dev/null || true
+        [[ -n "$_disabled_gw" ]] && sudo ip route add default via "$_disabled_gw" dev "$_disabled_iface" 2>/dev/null || true
     fi
 
     # Verifica se a rede externa foi de fato restaurada
@@ -782,7 +780,7 @@ enable_external_network() {
     done
     echo
 
-    grn "  Interface '$_disabled_conn' restaurada e conectividade confirmada."
+    grn "  Conectividade com a rede externa confirmada."
     echo
 
     # Limpa estado
