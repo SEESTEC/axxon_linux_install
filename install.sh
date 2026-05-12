@@ -725,6 +725,20 @@ disable_external_network() {
     sudo nmcli connection modify "$nm_conn" connection.autoconnect no
     sudo nmcli connection down "$nm_conn" 2>/dev/null || true
 
+    # Verifica se a rede externa foi de fato desabilitada
+    local i=1
+    while ping -c 1 -W 1 8.8.8.8 &>/dev/null; do
+        echo -ne "\r\033[K  Rede externa ainda ativa. Desconecte manualmente e aguarde. \e[1;90mPressione \"x\" para encerrar\e[0m [tentativa: $i]"
+        ((i++))
+        read -t 2 -n 1 key
+        if [[ "${key:-}" == 'x' ]]; then
+            echo
+            red "  Encerrado pelo usuário."
+            exit 1
+        fi
+    done
+    echo
+
     grn "  Interface $ext_iface ('$nm_conn') → desconectada / autoconnect desabilitado"
     echo
 }
@@ -754,16 +768,19 @@ enable_external_network() {
         fi
     fi
 
-    # Aguarda conectividade (até ~30 s)
-    local attempt=0
-    while ! ping -c 1 -W 2 8.8.8.8 &>/dev/null; do
-        ((attempt++))
-        if [[ $attempt -ge 15 ]]; then
-            red "  Sem conectividade após restaurar '$_disabled_conn'. Verifique a rede manualmente."
-            return 1
+    # Verifica se a rede externa foi de fato restaurada
+    local i=1
+    while ! ping -c 1 -W 1 8.8.8.8 &>/dev/null; do
+        echo -ne "\r\033[K  Rede externa ainda inativa. Conecte manualmente e aguarde. \e[1;90mPressione \"x\" para encerrar\e[0m [tentativa: $i]"
+        ((i++))
+        read -t 2 -n 1 key
+        if [[ "${key:-}" == 'x' ]]; then
+            echo
+            red "  Encerrado pelo usuário."
+            exit 1
         fi
-        sleep 2
     done
+    echo
 
     grn "  Interface '$_disabled_conn' restaurada e conectividade confirmada."
     echo
