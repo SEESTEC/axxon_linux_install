@@ -717,9 +717,13 @@ disable_external_network() {
     _disabled_conn="$nm_conn"
     _disabled_gw="$gw"
 
+    # Remove a rota default imediatamente — antes que o NM possa reagir
+    sudo ip route del default 2>/dev/null || true
+    # Desgerencia o device para o NM não re-adicionar a rota automaticamente
+    sudo nmcli device set "$ext_iface" managed no 2>/dev/null || true
+
     sudo nmcli connection modify "$nm_conn" connection.autoconnect no
     sudo nmcli connection down "$nm_conn" 2>/dev/null || true
-    sudo ip route del default 2>/dev/null || true
 
     grn "  Interface $ext_iface ('$nm_conn') → desconectada / autoconnect desabilitado"
     echo
@@ -737,6 +741,9 @@ enable_external_network() {
 
     # Reabilita reconexão automática
     sudo nmcli connection modify "$_disabled_conn" connection.autoconnect yes 2>/dev/null || true
+
+    # Devolve o device ao controle do NM antes de subir a conexão
+    sudo nmcli device set "$_disabled_iface" managed yes 2>/dev/null || true
 
     # Sobe a interface via NetworkManager
     if ! sudo nmcli connection up "$_disabled_conn" 2>/dev/null; then
