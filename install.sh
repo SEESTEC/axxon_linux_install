@@ -717,9 +717,9 @@ disable_external_network() {
     _disabled_conn="$nm_conn"
     _disabled_gw="$gw"
 
-    nmcli connection modify "$nm_conn" connection.autoconnect no
-    nmcli connection down "$nm_conn" 2>/dev/null || true
-    ip route del default 2>/dev/null || true
+    sudo nmcli connection modify "$nm_conn" connection.autoconnect no
+    sudo nmcli connection down "$nm_conn" 2>/dev/null || true
+    sudo ip route del default 2>/dev/null || true
 
     grn "  Interface $ext_iface ('$nm_conn') → desconectada / autoconnect desabilitado"
     echo
@@ -736,14 +736,14 @@ enable_external_network() {
     echo
 
     # Reabilita reconexão automática
-    nmcli connection modify "$_disabled_conn" connection.autoconnect yes 2>/dev/null || true
+    sudo nmcli connection modify "$_disabled_conn" connection.autoconnect yes 2>/dev/null || true
 
     # Sobe a interface via NetworkManager
-    if ! nmcli connection up "$_disabled_conn" 2>/dev/null; then
+    if ! sudo nmcli connection up "$_disabled_conn" 2>/dev/null; then
         warn "  nmcli não ativou '$_disabled_conn'. Tentando restauração manual..."
-        ip link set "$_disabled_iface" up 2>/dev/null || true
+        sudo ip link set "$_disabled_iface" up 2>/dev/null || true
         if [[ -n "$_disabled_gw" ]]; then
-            ip route add default via "$_disabled_gw" dev "$_disabled_iface" 2>/dev/null || true
+            sudo ip route add default via "$_disabled_gw" dev "$_disabled_iface" 2>/dev/null || true
         fi
     fi
 
