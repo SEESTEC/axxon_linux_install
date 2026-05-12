@@ -449,6 +449,41 @@ else
     ckpt_done "setup_repo" "Repositório e chave GPG"
 fi
 
+# ── pré-download de dependências (com rede ativa, antes de disable_external_network) ──
+predownload_deps() {
+    local pkg_dir="$1"
+
+    local -a all_debs
+    shopt -s nullglob
+    all_debs=("$pkg_dir"/*.deb)
+    shopt -u nullglob
+
+    [[ ${#all_debs[@]} -eq 0 ]] && return 0
+
+    info "Pré-baixando dependências para instalação offline..."
+    echo
+
+    # Desempacota os .deb — vai falhar na configuração mas registra as deps no dpkg
+    dpkg -i "${all_debs[@]}" 2>/dev/null || true
+
+    # Baixa apenas as deps faltantes para o cache local sem instalar nem atualizar
+    apt-get install -fy \
+        --download-only \
+        --no-upgrade \
+        2>/dev/null || true
+
+    # Extrai os nomes dos pacotes axxon e purga o estado parcial do dpkg
+    # para que a instalação offline parta de um estado limpo
+    local pkg_name
+    for deb in "${all_debs[@]}"; do
+        pkg_name=$(dpkg-deb --field "$deb" Package 2>/dev/null) || continue
+        dpkg --purge --force-remove-reinstreq "$pkg_name" 2>/dev/null || true
+    done
+
+    grn "  Dependências em cache: /var/cache/apt/archives/"
+    echo
+}
+
 # ── instalação server (apenas pacotes .deb) ───────────────────────────────────
 install_server_pkgs() {
     local pkg_dir="$1"
@@ -471,11 +506,11 @@ install_server_pkgs() {
     fi
 
     info "Instalando drivers e detectores..."
-    dpkg -i "${driver_debs[@]}" || apt-get install -fy
+    dpkg -i "${driver_debs[@]}" || apt-get install -fy --no-upgrade
 
     info "Instalando Axxon One Core e Server..."
-    dpkg -i "${core_debs[@]}"   || apt-get install -fy
-    dpkg -i "${server_debs[@]}" || apt-get install -fy
+    dpkg -i "${core_debs[@]}"   || apt-get install -fy --no-upgrade
+    dpkg -i "${server_debs[@]}" || apt-get install -fy --no-upgrade
 }
 
 # ── instalação client (apenas pacotes .deb + mono) ────────────────────────────
@@ -500,10 +535,10 @@ install_client_pkgs() {
     apt-get install -y mono-complete -t stretch
 
     info "Instalando Axxon One Client (binários)..."
-    dpkg -i "${bin_debs[@]}"    || apt-get install -fy
+    dpkg -i "${bin_debs[@]}"    || apt-get install -fy --no-upgrade
 
     info "Instalando Axxon One Client..."
-    dpkg -i "${client_debs[@]}" || apt-get install -fy
+    dpkg -i "${client_debs[@]}" || apt-get install -fy --no-upgrade
 }
 
 # ── download scripts companheiros (client only) ──────────────────────────────
@@ -793,6 +828,13 @@ enable_external_network() {
 if ckpt_is_done "install_pkgs"; then
     ckpt_skip "install_pkgs" "Instalação dos pacotes .deb"
 else
+    # Fase 1 — pré-download de deps com rede ativa (antes de desligar)
+    if [[ "$type" == "server" ]]; then
+        predownload_deps "$PKG_DIR"
+    elif [[ "$type" == "client" ]]; then
+        predownload_deps "$PKG_DIR"
+    fi
+    # Fase 2 — instalação offline: deps já estão em /var/cache/apt/archives/
     disable_external_network
     if [[ "$type" == "server" ]]; then
         install_server_pkgs "$PKG_DIR"
