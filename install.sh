@@ -793,13 +793,13 @@ enable_external_network() {
 if ckpt_is_done "install_pkgs"; then
     ckpt_skip "install_pkgs" "Instalação dos pacotes .deb"
 else
-    disable_external_network
+    # disable_external_network
     if [[ "$type" == "server" ]]; then
         install_server_pkgs "$PKG_DIR"
     elif [[ "$type" == "client" ]]; then
         install_client_pkgs "$PKG_DIR"
     fi
-    enable_external_network
+    # enable_external_network
     ckpt_done "install_pkgs" "Instalação dos pacotes .deb"
 fi
 
