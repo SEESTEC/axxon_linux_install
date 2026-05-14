@@ -115,7 +115,7 @@ ckpt_show_status() {
     _ckpt_row cleanup_config   "Retenção de gravações"      "client"
     _ckpt_row setup_autostart  "Autostart screenREC"        "client"
     _ckpt_row setup_samba      "Servidor Samba"             "client"
-    _ckpt_row save_sudo_pass   "Credencial sudo"            "client"
+    _ckpt_row save_sudo_pass   "Credencial sudo"
     _ckpt_row force_xorg       "Desabilitar Wayland"        "client"
     _ckpt_row setup_watchdog   "Axxon Guardian (watchdog)"  "client"
     echo
@@ -326,7 +326,7 @@ echo "
 --------- IPV4: \$(hostname -I)
 --------- HOST:
 \$(hostnamectl)
-\$(sudo systemctl status axxon-one)
+\$(grep '^SUDO_PASS=' \$HOME/screenREC/.env 2>/dev/null | cut -d= -f2- | sudo -S systemctl status axxon-one 2>/dev/null)
 
 # ── SEESTEC - ENGENHARIA E TECNOLOGIA ─────────────────────────────────────────
 
@@ -348,7 +348,7 @@ echo "
 --------- IPV4: \$(hostname -I)
 --------- HOST:
 \$(hostnamectl)
-\$(sudo systemctl status axxon-one)
+\$(grep '^SUDO_PASS=' \$HOME/screenREC/.env 2>/dev/null | cut -d= -f2- | sudo -S systemctl status axxon-one 2>/dev/null)
 
 # ── SEESTEC - ENGENHARIA E TECNOLOGIA ─────────────────────────────────────────
 
@@ -582,6 +582,7 @@ save_sudo_password() {
     local real_home
     real_home=$(getent passwd "$real_user" | cut -d: -f6)
     local env_file="$real_home/screenREC/.env"
+    sudo -u "$real_user" mkdir -p "$real_home/screenREC"
 
     echo
     info "Configurando credencial sudo para scripts automatizados..."
@@ -818,6 +819,14 @@ else
     ckpt_done "install_pkgs" "Instalação dos pacotes .deb"
 fi
 
+# ── passo: credencial sudo (server + client) ─────────────────────────────────
+if ckpt_is_done "save_sudo_pass"; then
+    ckpt_skip "save_sudo_pass" "Credencial sudo"
+else
+    save_sudo_password
+    ckpt_done "save_sudo_pass" "Credencial sudo"
+fi
+
 # ── passos exclusivos do client ───────────────────────────────────────────────
 if [[ "$type" == "client" ]]; then
 
@@ -852,13 +861,6 @@ if [[ "$type" == "client" ]]; then
         real_home=$(getent passwd "$real_user" | cut -d: -f6)
         bash "$real_home/screenREC/setup_samba.sh"
         ckpt_done "setup_samba" "Servidor Samba"
-    fi
-
-    if ckpt_is_done "save_sudo_pass"; then
-        ckpt_skip "save_sudo_pass" "Credencial sudo"
-    else
-        save_sudo_password
-        ckpt_done "save_sudo_pass" "Credencial sudo"
     fi
 
     if ckpt_is_done "force_xorg"; then
