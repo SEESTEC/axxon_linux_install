@@ -252,6 +252,8 @@ else
     _brc_user="${SUDO_USER:-$USER}"
     _brc_home=$(getent passwd "$_brc_user" | cut -d: -f6)
     if ! grep -q "SEESTEC - ENGENHARIA E TECNOLOGIA" "$_brc_home/.bashrc" 2>/dev/null; then
+
+        # ── aliases comuns (server + client) ──────────────────────────────────
         cat >> "$_brc_home/.bashrc" << BASHRC
 
 # ── SEESTEC - ENGENHARIA E TECNOLOGIA ─────────────────────────────────────────
@@ -261,6 +263,11 @@ alias axxon-start="sudo systemctl start axxon-one"
 alias axxon-stop="sudo systemctl stop axxon-one"
 alias axxon-restart="sudo systemctl restart axxon-one"
 alias axxon-status="sudo systemctl status axxon-one"
+BASHRC
+
+        # ── aliases exclusivos do client ──────────────────────────────────────
+        if [[ "$type" == "client" ]]; then
+            cat >> "$_brc_home/.bashrc" << BASHRC
 
 # Identificação e busca de gravações
 alias ask-tag="python3 \$HOME/screenREC/ask_tag.py"
@@ -301,6 +308,12 @@ alias samba-restart="sudo systemctl restart smbd nmbd"
 alias samba-users="sudo pdbedit -L"
 alias samba-passwd="sudo smbpasswd \$USER"
 alias samba-test="smbclient //localhost/REC_SHARE -U \$USER"
+BASHRC
+        fi
+
+        # ── banner de login — server ───────────────────────────────────────────
+        if [[ "$type" == "server" ]]; then
+            cat >> "$_brc_home/.bashrc" << BASHRC
 
 echo "
 ---------- AXXON ONE ${type^^} - ${version} ----------
@@ -316,6 +329,22 @@ echo "
   axxon-stop               # para o serviço Axxon One
   axxon-restart            # reinicia o serviço Axxon One
   axxon-status             # exibe status do serviço Axxon One
+"
+BASHRC
+        fi
+
+        # ── banner de login — client ───────────────────────────────────────────
+        if [[ "$type" == "client" ]]; then
+            cat >> "$_brc_home/.bashrc" << BASHRC
+
+echo "
+---------- AXXON ONE ${type^^} - ${version} ----------
+--------- IPV4: \$(hostname -I)
+--------- HOST:
+\$(hostnamectl)
+\$(sudo systemctl status axxon-one)
+
+# ── SEESTEC - ENGENHARIA E TECNOLOGIA ─────────────────────────────────────────
 
 # Identificação e busca de gravações
   ask-tag                  # identifica câmera/tag de uma gravação
@@ -358,6 +387,8 @@ echo "
   samba-test               # testa conexão Samba local
 "
 BASHRC
+        fi
+
     fi
     ckpt_done "bashrc" "Aliases no .bashrc"
 fi
