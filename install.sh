@@ -88,9 +88,9 @@ _ckpt_row() {
         [[ "$saved_type" == "$type_filter" ]] || return 0
     fi
     if ckpt_is_done "$step"; then
-        printf "║  ✓  %-46s ║\n" "$label"
+        printf "  ✓  %-46s \n" "$label"
     else
-        printf "║  ○  %-46s ║\n" "$label"
+        printf "  ○  %-46s \n" "$label"
     fi
 }
 
@@ -100,11 +100,11 @@ ckpt_show_status() {
     echo
     echo "╔══════════════════════════════════════════════════════╗"
     echo "║      AXXON ONE — Instalação Anterior Detectada       ║"
-    echo "╠══════════════════════════════════════════════════════╣"
-    printf "║  Tipo    : %-41s ║\n" "${saved_type:-?}"
-    printf "║  Versão  : %-41s ║\n" "${saved_version:-?}"
-    echo "║                                                      ║"
-    echo "║  Progresso dos passos:                               ║"
+    echo "╚══════════════════════════════════════════════════════╝"
+    printf "  Tipo    : %-41s\n" "${saved_type:-?}"
+    printf "  Versão  : %-41s\n" "${saved_version:-?}"
+    echo
+    echo "  Progresso dos passos:"
     _ckpt_row apt_update       "Atualização do sistema"
     _ckpt_row bashrc           "Aliases no .bashrc"
     _ckpt_row download_zip     "Download do pacote Axxon"
@@ -118,7 +118,6 @@ ckpt_show_status() {
     _ckpt_row save_sudo_pass   "Credencial sudo"            "client"
     _ckpt_row force_xorg       "Desabilitar Wayland"        "client"
     _ckpt_row disable_network  "Desabilitar rede externa"
-    echo "╚══════════════════════════════════════════════════════╝"
     echo
 }
 
