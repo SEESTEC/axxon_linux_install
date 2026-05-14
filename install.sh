@@ -117,7 +117,6 @@ ckpt_show_status() {
     _ckpt_row setup_samba      "Servidor Samba"             "client"
     _ckpt_row save_sudo_pass   "Credencial sudo"            "client"
     _ckpt_row force_xorg       "Desabilitar Wayland"        "client"
-    _ckpt_row disable_network  "Desabilitar rede externa"
     echo
 }
 
@@ -201,37 +200,13 @@ choose_type() {
     done
 }
 
-choose_version() {
-    local opt
-    while true; do
-        echo
-        echo "╔════════════════════════════════════════╗"
-        echo "║     AXXON ONE — Versão                 ║"
-        echo "╠════════════════════════════════════════╣"
-        echo "║  1) Axxon One 2.0  (build 2.0.14.79)   ║"
-        echo "║  2) Axxon One 3.0  (build 3.0.0.46)    ║"
-        echo "║  3) Sair                               ║"
-        echo "╚════════════════════════════════════════╝"
-        read -rp "Escolha a versão [1-3]: " opt
-        case "$opt" in
-            1) version="2.0"; return ;;
-            2) version="3.0"; return ;;
-            3) abort ;;
-            *) echo; red "Opção inválida. Tente novamente." ;;
-        esac
-    done
-}
-
 if [[ "$_resuming" == false ]]; then
     while true; do
         choose_type
         confirm "Confirma instalação do tipo $(bold "$type")?" && break
     done
 
-    while true; do
-        choose_version
-        confirm "Confirma versão $(bold "$version")?" && break
-    done
+    version="3.0"
 
     # Salva tipo e versão no checkpoint logo após confirmação
     mkdir -p "$INSTALL_DIR"
@@ -239,24 +214,21 @@ if [[ "$_resuming" == false ]]; then
     ckpt_set "VERSION" "$version"
 fi
 
-# ── verificação de SO por versão ──────────────────────────────────────────────
-required_os="$( [[ "$version" == "2.0" ]] && echo "20.04" || echo "24.04" )"
-if [[ "$os_id" != "ubuntu" || "$os_version" != "$required_os" ]]; then
+# ── verificação de SO (mínimo Ubuntu 24.04) ──────────────────────────────────
+if [[ "$os_id" != "ubuntu" ]] || ! printf '%s\n%s\n' "24.04" "$os_version" | sort -V -C 2>/dev/null; then
     echo
     red "Sistema operacional incompatível: $os_id $os_version"
-    echo "  Axxon One $version requer Ubuntu ${required_os} LTS."
+    echo "  Axxon One $version requer Ubuntu 24.04 LTS ou superior."
     echo
     exit 1
 fi
 
 # ── URLs de download ──────────────────────────────────────────────────────────
 declare -A URLS=(
-    ["server_2.0"]="https://dl.axxonsoft.com/software/Axxon-One/Axxon-One/2.0.14.79/linux-amd64-server.zip"
-    ["client_2.0"]="https://dl.axxonsoft.com/software/Axxon-One/Axxon-One/2.0.14.79/linux-amd64-client.zip"
-    ["server_3.0"]="https://dl.axxonsoft.com/software/Axxon-One/Axxon-One/3.0.0.46/linux-amd64-server.zip"
-    ["client_3.0"]="https://dl.axxonsoft.com/software/Axxon-One/Axxon-One/3.0.0.46/linux-amd64-client.zip"
+    ["server"]="https://dl.axxonsoft.com/software/Axxon-One/Axxon-One/3.0.0.46/linux-amd64-server.zip"
+    ["client"]="https://dl.axxonsoft.com/software/Axxon-One/Axxon-One/3.0.0.46/linux-amd64-client.zip"
 )
-url="${URLS[${type}_${version}]}"
+url="${URLS[$type]}"
 
 mkdir -p "$INSTALL_DIR"
 
@@ -447,50 +419,6 @@ else
     setup_repo
     ckpt_done "setup_repo" "Repositório e chave GPG"
 fi
-
-# ── pré-download de dependências (com rede ativa, antes de disable_external_network) ──
-predownload_deps() {
-    local pkg_dir="$1"
-
-    local -a all_debs
-    shopt -s nullglob
-    all_debs=("$pkg_dir"/*.deb)
-    shopt -u nullglob
-
-    [[ ${#all_debs[@]} -eq 0 ]] && return 0
-
-    info "Pré-baixando dependências para instalação offline..."
-    echo
-
-    # Desempacota os .deb — vai falhar na configuração mas registra as deps no dpkg
-    dpkg -i "${all_debs[@]}" 2>/dev/null || true
-
-    # Coloca os pacotes axxon em hold ANTES do apt-get para que ele não tente
-    # "corrigir" os pacotes em estado unconfigured baixando a versão 3.0 do repo
-    # (--no-upgrade não é suficiente pois unconfigured não é visto como "instalado")
-    local pkg_name
-    local -a axxon_pkg_names=()
-    for deb in "${all_debs[@]}"; do
-        pkg_name=$(dpkg-deb --field "$deb" Package 2>/dev/null) || continue
-        apt-mark hold "$pkg_name" 2>/dev/null || true
-        axxon_pkg_names+=("$pkg_name")
-    done
-
-    # Baixa apenas as deps faltantes para o cache local sem instalar nem atualizar
-    apt-get install -fy \
-        --download-only \
-        --no-upgrade \
-        2>/dev/null || true
-
-    # Remove o hold e purga o estado parcial do dpkg
-    for pkg_name in "${axxon_pkg_names[@]}"; do
-        apt-mark unhold "$pkg_name" 2>/dev/null || true
-        dpkg --purge --force-remove-reinstreq "$pkg_name" 2>/dev/null || true
-    done
-
-    grn "  Dependências em cache: /var/cache/apt/archives/"
-    echo
-}
 
 # ── instalação server (apenas pacotes .deb) ───────────────────────────────────
 install_server_pkgs() {
@@ -717,139 +645,15 @@ SVCEOF
     echo
 }
 
-# Estado salvo por disable_external_network para uso posterior pelo enable
-_disabled_iface=""
-_disabled_conn=""
-_disabled_gw=""
-
-# ── desabilitar rede externa (DHCP) ──────────────────────────────────────────
-disable_external_network() {
-    info "Removendo conexão de rede externa (DHCP)..."
-    echo
-
-    local ext_iface
-    ext_iface=$(ip route get 8.8.8.8 2>/dev/null \
-        | awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')
-
-    if [[ -z "$ext_iface" ]]; then
-        info "  Nenhuma rota de internet detectada. Nada a desabilitar."
-        return 0
-    fi
-
-    # Captura o gateway ANTES de remover a rota (necessário para restauração)
-    local gw
-    gw=$(ip route get 8.8.8.8 2>/dev/null \
-        | awk '{for(i=1;i<=NF;i++) if($i=="via") {print $(i+1); exit}}')
-
-    _disabled_iface="$ext_iface"
-    _disabled_gw="$gw"
-
-    # Remove a rota default imediatamente — antes que o NM possa reagir
-    sudo ip route del default 2>/dev/null || true
-
-    # Tenta desabilitar via nmcli se disponível
-    if command -v nmcli &>/dev/null; then
-        local nm_conn
-        nm_conn=$(nmcli -t -f NAME,DEVICE connection show --active \
-            | awk -F: -v iface="$ext_iface" '$2==iface {print $1; exit}')
-
-        if [[ -n "$nm_conn" ]]; then
-            _disabled_conn="$nm_conn"
-            sudo nmcli device set "$ext_iface" managed no 2>/dev/null || true
-            sudo nmcli connection modify "$nm_conn" connection.autoconnect no 2>/dev/null || true
-            sudo nmcli connection down "$nm_conn" 2>/dev/null || true
-        else
-            warn "  Interface $ext_iface não gerenciada pelo NetworkManager."
-        fi
-    else
-        warn "  nmcli não encontrado. Rota removida via ip route."
-    fi
-
-    # Verifica se a rede externa foi de fato desabilitada
-    local i=1
-    while ping -c 1 -W 1 8.8.8.8 &>/dev/null; do
-        echo -ne "\r\033[K  Rede externa ainda ativa. Desconecte manualmente e aguarde. \e[1;90mPressione \"x\" para encerrar\e[0m [tentativa: $i]"
-        ((i++))
-        read -t 2 -n 1 key
-        if [[ "${key:-}" == 'x' ]]; then
-            echo
-            red "  Encerrado pelo usuário."
-            exit 1
-        fi
-    done
-    echo
-
-    grn "  Interface $ext_iface → desconectada"
-    echo
-}
-
-# ── habilitar rede externa ────────────────────────────────────────────────────
-enable_external_network() {
-    if [[ -z "$_disabled_iface" ]]; then
-        warn "  Nenhuma interface foi desabilitada nesta sessão. Nada a restaurar."
-        return 0
-    fi
-
-    info "Restaurando conexão de rede externa ('${_disabled_conn:-$_disabled_iface}')..."
-    echo
-
-    if command -v nmcli &>/dev/null && [[ -n "$_disabled_conn" ]]; then
-        # Reabilita reconexão automática e devolve o device ao NM
-        sudo nmcli connection modify "$_disabled_conn" connection.autoconnect yes 2>/dev/null || true
-        sudo nmcli device set "$_disabled_iface" managed yes 2>/dev/null || true
-
-        if ! sudo nmcli connection up "$_disabled_conn" 2>/dev/null; then
-            warn "  nmcli não ativou '$_disabled_conn'. Tentando restauração manual..."
-            sudo ip link set "$_disabled_iface" up 2>/dev/null || true
-            [[ -n "$_disabled_gw" ]] && sudo ip route add default via "$_disabled_gw" dev "$_disabled_iface" 2>/dev/null || true
-        fi
-    else
-        # Restauração manual sem nmcli
-        sudo ip link set "$_disabled_iface" up 2>/dev/null || true
-        [[ -n "$_disabled_gw" ]] && sudo ip route add default via "$_disabled_gw" dev "$_disabled_iface" 2>/dev/null || true
-    fi
-
-    # Verifica se a rede externa foi de fato restaurada
-    local i=1
-    while ! ping -c 1 -W 1 8.8.8.8 &>/dev/null; do
-        echo -ne "\r\033[K  Rede externa ainda inativa. Conecte manualmente e aguarde. \e[1;90mPressione \"x\" para encerrar\e[0m [tentativa: $i]"
-        ((i++))
-        read -t 2 -n 1 key
-        if [[ "${key:-}" == 'x' ]]; then
-            echo
-            red "  Encerrado pelo usuário."
-            exit 1
-        fi
-    done
-    echo
-
-    grn "  Conectividade com a rede externa confirmada."
-    echo
-
-    # Limpa estado
-    _disabled_iface=""
-    _disabled_conn=""
-    _disabled_gw=""
-}
-
 # ── passo: instalação dos pacotes .deb ───────────────────────────────────────
 if ckpt_is_done "install_pkgs"; then
     ckpt_skip "install_pkgs" "Instalação dos pacotes .deb"
 else
-    # Fase 1 — pré-download de deps com rede ativa (antes de desligar)
-    if [[ "$type" == "server" ]]; then
-        predownload_deps "$PKG_DIR"
-    elif [[ "$type" == "client" ]]; then
-        predownload_deps "$PKG_DIR"
-    fi
-    # Fase 2 — instalação offline: deps já estão em /var/cache/apt/archives/
-    disable_external_network
     if [[ "$type" == "server" ]]; then
         install_server_pkgs "$PKG_DIR"
     elif [[ "$type" == "client" ]]; then
         install_client_pkgs "$PKG_DIR"
     fi
-    enable_external_network
     ckpt_done "install_pkgs" "Instalação dos pacotes .deb"
 fi
 
@@ -903,14 +707,6 @@ if [[ "$type" == "client" ]]; then
         ckpt_done "force_xorg" "Desabilitar Wayland"
     fi
 
-fi
-
-# ── passo: desabilitar rede externa ───────────────────────────────────────────
-if ckpt_is_done "disable_network"; then
-    ckpt_skip "disable_network" "Desabilitar rede externa"
-else
-    disable_external_network
-    ckpt_done "disable_network" "Desabilitar rede externa"
 fi
 
 # ── conclusão ─────────────────────────────────────────────────────────────────
