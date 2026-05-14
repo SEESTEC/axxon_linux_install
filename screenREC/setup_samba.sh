@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+export DEBIAN_FRONTEND=noninteractive
+
 red()  { printf '\033[0;31m%s\033[0m\n' "$*"; }
 grn()  { printf '\033[0;32m%s\033[0m\n' "$*"; }
 info() { printf '\033[0;36m%s\033[0m\n' "$*"; }
@@ -17,7 +19,7 @@ echo
 
 # ── 1. instalar pacotes ───────────────────────────────────────────────────────
 info "Instalando pacotes Samba e zenity..."
-apt-get install -y samba samba-common-bin zenity 2>/dev/null || \
+apt-get install -y samba samba-common-bin zenity || \
     apt-get install -y samba samba-common-bin
 grn "  Pacotes instalados."
 
@@ -169,7 +171,7 @@ EOF
     grn "  Seção [REC_SHARE] adicionada ao /etc/samba/smb.conf"
 fi
 
-# ── 6. definir senha Samba ────────────────────────────────────────────────────
+# ── 6. coletar senha Samba (aplicada depois que smbd inicializar) ─────────────
 echo
 info "Defina a senha Samba para o usuário '${real_user}':"
 info "(usada para acessar \\\\${hostname_short}\\REC_SHARE na rede local)"
@@ -189,19 +191,44 @@ while true; do
     echo
 done
 
-printf '%s\n%s\n' "$samba_pass1" "$samba_pass1" | smbpasswd -s -a "$real_user"
-grn "  Senha Samba configurada para '${real_user}'"
-
 # ── 7. firewall ───────────────────────────────────────────────────────────────
 if ufw status 2>/dev/null | grep -q 'Status: active'; then
     ufw allow samba
     grn "  ufw: regra Samba adicionada"
 fi
 
-# ── 8. habilitar e iniciar serviços ───────────────────────────────────────────
-systemctl enable smbd nmbd
-systemctl restart smbd nmbd
-grn "  Serviços smbd e nmbd habilitados e iniciados"
+# ── 8. validar smb.conf antes de reiniciar ────────────────────────────────────
+info "Validando smb.conf..."
+if ! testparm -s /etc/samba/smb.conf > /dev/null 2>&1; then
+    red "ERRO: smb.conf com sintaxe inválida. Restaurando backup..."
+    [[ -f /etc/samba/smb.conf.bak ]] && cp /etc/samba/smb.conf.bak /etc/samba/smb.conf
+    testparm -s /etc/samba/smb.conf 2>&1 | head -20
+    exit 1
+fi
+grn "  smb.conf validado."
+
+# ── 9. habilitar e iniciar serviços ───────────────────────────────────────────
+info "Habilitando e iniciando smbd e nmbd..."
+systemctl enable smbd
+systemctl enable nmbd
+systemctl restart smbd
+systemctl restart nmbd
+
+# Verificar se os serviços subiram de fato
+sleep 2
+for svc in smbd nmbd; do
+    if ! systemctl is-active --quiet "$svc"; then
+        red "ERRO: serviço $svc não iniciou."
+        systemctl status "$svc" --no-pager -l >&2 || true
+        exit 1
+    fi
+done
+grn "  Serviços smbd e nmbd habilitados e ativos."
+
+# ── 10. registrar senha Samba após serviço inicializado ──────────────────────
+info "Registrando usuário '${real_user}' no banco Samba..."
+printf '%s\n%s\n' "$samba_pass1" "$samba_pass1" | smbpasswd -s -a "$real_user"
+grn "  Senha Samba confirmada para '${real_user}'"
 
 echo
 grn "Samba configurado com sucesso!"

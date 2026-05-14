@@ -151,7 +151,16 @@ PREFIX="${TAG:-$SERIAL}"
 
 # ── diretório de gravação ─────────────────────────────────────────────────────
 REC_BASE=$(_resolve_rec_base)
-mkdir -p "$REC_BASE"
+
+if ! mkdir -p "$REC_BASE" 2>/dev/null || ! [[ -w "$REC_BASE" ]]; then
+    _msg="Diretório de gravação inacessível: $REC_BASE\nVerifique se o disco está montado e o Samba está configurado."
+    red "ERRO: $_msg"
+    command -v notify-send &>/dev/null && \
+        notify-send --urgency=critical "screenREC — Erro de gravação" "$_msg" 2>/dev/null || true
+    command -v zenity &>/dev/null && \
+        zenity --error --title="screenREC — Erro de gravação" --text="$_msg" --width=480 2>/dev/null || true
+    exit 1
+fi
 
 # Reutiliza pasta do dia se já existir; senão cria com timestamp de início
 REC_DIR=$(find "$REC_BASE" -maxdepth 1 -name "${PREFIX}_$(date '+%Y-%m-%d')*" -type d 2>/dev/null \
