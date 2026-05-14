@@ -253,10 +253,15 @@ else
     _brc_home=$(getent passwd "$_brc_user" | cut -d: -f6)
     if ! grep -q "SEESTEC - ENGENHARIA E TECNOLOGIA" "$_brc_home/.bashrc" 2>/dev/null; then
 
-        # ── aliases comuns (server + client) ──────────────────────────────────
+        # ── header comum (server + client) ────────────────────────────────────
         cat >> "$_brc_home/.bashrc" << BASHRC
 
 # ── SEESTEC - ENGENHARIA E TECNOLOGIA ─────────────────────────────────────────
+BASHRC
+
+        # ── aliases exclusivos do server ──────────────────────────────────────
+        if [[ "$type" == "server" ]]; then
+            cat >> "$_brc_home/.bashrc" << BASHRC
 
 # Axxon One — controle do serviço
 alias axxon-start="sudo systemctl start axxon-one"
@@ -264,6 +269,7 @@ alias axxon-stop="sudo systemctl stop axxon-one"
 alias axxon-restart="sudo systemctl restart axxon-one"
 alias axxon-status="sudo systemctl status axxon-one"
 BASHRC
+        fi
 
         # ── aliases exclusivos do client ──────────────────────────────────────
         if [[ "$type" == "client" ]]; then
