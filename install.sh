@@ -107,10 +107,10 @@ ckpt_show_status() {
     echo "  Progresso dos passos:"
     _ckpt_row apt_update       "Atualização do sistema"
     _ckpt_row bashrc           "Aliases no .bashrc"
-    _ckpt_row download_zip     "Download do pacote Axxon"
-    _ckpt_row extract_zip      "Extração do pacote"
+    _ckpt_row download_zip     "Download do pacote Axxon"   "client"
+    _ckpt_row extract_zip      "Extração do pacote"          "client"
     _ckpt_row setup_repo       "Repositório e chave GPG"
-    _ckpt_row install_pkgs     "Instalação dos pacotes .deb"
+    _ckpt_row install_pkgs     "Instalação dos pacotes"
     _ckpt_row download_scripts "Scripts screenREC"          "client"
     _ckpt_row cleanup_config   "Retenção de gravações"      "client"
     _ckpt_row setup_autostart  "Autostart screenREC"        "client"
@@ -224,12 +224,10 @@ if [[ "$os_id" != "ubuntu" ]] || ! printf '%s\n%s\n' "24.04" "$os_version" | sor
     exit 1
 fi
 
-# ── URLs de download ──────────────────────────────────────────────────────────
-declare -A URLS=(
-    ["server"]="https://dl.axxonsoft.com/software/Axxon-One/Axxon-One/3.0.0.46/linux-amd64-server.zip"
-    ["client"]="https://dl.axxonsoft.com/software/Axxon-One/Axxon-One/3.0.0.46/linux-amd64-client.zip"
-)
-url="${URLS[$type]}"
+# ── URL de download (client only) ────────────────────────────────────────────
+url=""
+[[ "$type" == "client" ]] && \
+    url="https://dl.axxonsoft.com/software/Axxon-One/Axxon-One/3.0.0.46/linux-amd64-client.zip"
 
 mkdir -p "$INSTALL_DIR"
 
@@ -399,35 +397,36 @@ BASHRC
     ckpt_done "bashrc" "Aliases no .bashrc"
 fi
 
-# ── passo: download do pacote Axxon ──────────────────────────────────────────
-if ckpt_is_done "download_zip" && [[ -s "$ZIP_FILE" ]]; then
-    ckpt_skip "download_zip" "Download do pacote Axxon"
-else
-    # Reinicia o passo se o arquivo sumiu após ter sido marcado como concluído
-    if ckpt_is_done "download_zip" && [[ ! -s "$ZIP_FILE" ]]; then
-        warn "Arquivo de download não encontrado. Baixando novamente..."
-        ckpt_set "download_zip" "pending"
-        ckpt_set "extract_zip"  "pending"
-    fi
-    echo
-    info "Baixando Axxon One ${version} ${type}..."
-    echo "  URL: $url"
-    echo
-    # wget -c retoma o download de onde parou caso o arquivo parcial exista
-    wget -c --progress=bar:force:noscroll -O "$ZIP_FILE" "$url"
-    [[ -s "$ZIP_FILE" ]] || { red "Download falhou ou arquivo vazio."; exit 1; }
-    ckpt_done "download_zip" "Download do pacote Axxon"
-fi
+# ── passos: download e extração (client only) ────────────────────────────────
+if [[ "$type" == "client" ]]; then
 
-# ── passo: extração do pacote ─────────────────────────────────────────────────
-if ckpt_is_done "extract_zip" && [[ -d "$PKG_DIR" ]]; then
-    ckpt_skip "extract_zip" "Extração do pacote"
-else
-    echo
-    info "Extraindo pacote..."
-    rm -rf "$PKG_DIR"
-    unzip -q "$ZIP_FILE" -d "$PKG_DIR"
-    ckpt_done "extract_zip" "Extração do pacote"
+    if ckpt_is_done "download_zip" && [[ -s "$ZIP_FILE" ]]; then
+        ckpt_skip "download_zip" "Download do pacote Axxon"
+    else
+        if ckpt_is_done "download_zip" && [[ ! -s "$ZIP_FILE" ]]; then
+            warn "Arquivo de download não encontrado. Baixando novamente..."
+            ckpt_set "download_zip" "pending"
+            ckpt_set "extract_zip"  "pending"
+        fi
+        echo
+        info "Baixando Axxon One ${version} client..."
+        echo "  URL: $url"
+        echo
+        wget -c --progress=bar:force:noscroll -O "$ZIP_FILE" "$url"
+        [[ -s "$ZIP_FILE" ]] || { red "Download falhou ou arquivo vazio."; exit 1; }
+        ckpt_done "download_zip" "Download do pacote Axxon"
+    fi
+
+    if ckpt_is_done "extract_zip" && [[ -d "$PKG_DIR" ]]; then
+        ckpt_skip "extract_zip" "Extração do pacote"
+    else
+        echo
+        info "Extraindo pacote..."
+        rm -rf "$PKG_DIR"
+        unzip -q "$ZIP_FILE" -d "$PKG_DIR"
+        ckpt_done "extract_zip" "Extração do pacote"
+    fi
+
 fi
 
 # ── repositório e GPG (compartilhados) ───────────────────────────────────────
@@ -457,35 +456,6 @@ else
     setup_repo
     ckpt_done "setup_repo" "Repositório e chave GPG"
 fi
-
-# ── instalação server (apenas pacotes .deb) ───────────────────────────────────
-install_server_pkgs() {
-    local pkg_dir="$1"
-
-    local -a driver_debs core_debs server_debs
-    shopt -s nullglob
-    driver_debs=("$pkg_dir"/axxon-d*.deb)
-    core_debs=("$pkg_dir"/axxon-one-core*.deb)
-    server_debs=("$pkg_dir"/axxon-one_*.deb)
-    shopt -u nullglob
-
-    if [[ ${#driver_debs[@]} -eq 0 ]]; then
-        red "Pacotes axxon-d*.deb não encontrados em $pkg_dir."
-        red "Verifique se o download foi concluído corretamente."
-        exit 1
-    fi
-    if [[ ${#core_debs[@]} -eq 0 || ${#server_debs[@]} -eq 0 ]]; then
-        red "Pacotes axxon-one-core ou axxon-one não encontrados em $pkg_dir."
-        exit 1
-    fi
-
-    info "Instalando drivers e detectores..."
-    dpkg -i "${driver_debs[@]}" || apt-get install -fy --no-upgrade
-
-    info "Instalando Axxon One Core e Server..."
-    dpkg -i "${core_debs[@]}"   || apt-get install -fy --no-upgrade
-    dpkg -i "${server_debs[@]}" || apt-get install -fy --no-upgrade
-}
 
 # ── instalação client (apenas pacotes .deb + mono) ────────────────────────────
 install_client_pkgs() {
@@ -807,16 +777,18 @@ SERVICE
     echo
 }
 
-# ── passo: instalação dos pacotes .deb ───────────────────────────────────────
+# ── passo: instalação dos pacotes ────────────────────────────────────────────
 if ckpt_is_done "install_pkgs"; then
-    ckpt_skip "install_pkgs" "Instalação dos pacotes .deb"
+    ckpt_skip "install_pkgs" "Instalação dos pacotes"
 else
     if [[ "$type" == "server" ]]; then
-        install_server_pkgs "$PKG_DIR"
+        info "Instalando Axxon One Server via apt..."
+        echo
+        apt-get install -y axxon-one
     elif [[ "$type" == "client" ]]; then
         install_client_pkgs "$PKG_DIR"
     fi
-    ckpt_done "install_pkgs" "Instalação dos pacotes .deb"
+    ckpt_done "install_pkgs" "Instalação dos pacotes"
 fi
 
 # ── passo: credencial sudo (server + client) ─────────────────────────────────
