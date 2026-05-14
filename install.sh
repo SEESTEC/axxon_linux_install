@@ -117,6 +117,7 @@ ckpt_show_status() {
     _ckpt_row setup_samba      "Servidor Samba"             "client"
     _ckpt_row save_sudo_pass   "Credencial sudo"            "client"
     _ckpt_row force_xorg       "Desabilitar Wayland"        "client"
+    _ckpt_row setup_watchdog   "Axxon Guardian (watchdog)"  "client"
     echo
 }
 
@@ -645,6 +646,129 @@ SVCEOF
     echo
 }
 
+# ── watchdog / guardian do Axxon One Client ──────────────────────────────────
+setup_axxon_watchdog() {
+    local real_user="${SUDO_USER:-$USER}"
+    local real_home
+    real_home=$(getent passwd "$real_user" | cut -d: -f6)
+
+    info "Instalando dependências de controle de janela..."
+    apt-get install -y xdotool x11-utils
+    echo
+
+    info "Criando script Axxon Guardian..."
+    tee /usr/local/bin/axxon-guardian.sh > /dev/null << 'GUARDIAN'
+#!/bin/bash
+# Mantém o Axxon One Client sempre em execução.
+
+AXXON_BIN=""
+for _c in \
+    /usr/bin/AxxonOneClient \
+    /usr/local/bin/AxxonOneClient \
+    /opt/AxxonOneClient/bin/AxxonOneClient; do
+    [[ -x "$_c" ]] && { AXXON_BIN="$_c"; break; }
+done
+[[ -z "$AXXON_BIN" ]] && \
+    AXXON_BIN=$(find /usr /opt -maxdepth 8 -name "AxxonOneClient" -type f 2>/dev/null | head -1)
+
+if [[ -z "$AXXON_BIN" ]]; then
+    notify-send "Axxon Guardian" "Executável AxxonOneClient não encontrado." 2>/dev/null || true
+    exit 1
+fi
+
+ASK_TAG="$HOME/screenREC/ask_tag.py"
+LOG="/tmp/axxon-guardian.log"
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG"; }
+
+export DISPLAY="${DISPLAY:-:0}"
+export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-x11}"
+
+log "=== Axxon Guardian iniciado — $AXXON_BIN ==="
+
+while true; do
+    log "Iniciando AxxonOneClient..."
+
+    ASK_TAG_PID=""
+    if [[ -f "$ASK_TAG" ]]; then
+        python3 "$ASK_TAG" &
+        ASK_TAG_PID=$!
+        log "ask_tag iniciado (PID $ASK_TAG_PID)"
+    fi
+
+    "$AXXON_BIN" &
+    AXXON_PID=$!
+    log "AxxonOneClient iniciado (PID $AXXON_PID)"
+
+    # Aguarda a janela aparecer e remove o botão de fechar via Motif hints
+    if command -v xdotool &>/dev/null && command -v xprop &>/dev/null; then
+        WIN=""
+        for _i in {1..20}; do
+            sleep 1
+            WIN=$(xdotool search --pid "$AXXON_PID" 2>/dev/null | tail -1)
+            [[ -n "$WIN" ]] && break
+        done
+        if [[ -n "$WIN" ]]; then
+            # MWM_HINTS_FUNCTIONS=1, funcs=resize+move+minimize+maximize (sem close=32)
+            xprop -id "$WIN" -f _MOTIF_WM_HINTS 32c \
+                -set _MOTIF_WM_HINTS "1, 30, 0, 0, 0" 2>/dev/null || true
+            log "Botão de fechar removido (window=$WIN)"
+        fi
+    fi
+
+    wait "$AXXON_PID" 2>/dev/null
+    log "AxxonOneClient encerrado. Reiniciando em 2s..."
+
+    [[ -n "$ASK_TAG_PID" ]] && kill "$ASK_TAG_PID" 2>/dev/null || true
+    unset ASK_TAG_PID AXXON_PID WIN
+
+    sleep 2
+done
+GUARDIAN
+    chmod +x /usr/local/bin/axxon-guardian.sh
+
+    # Autostart para todos os usuários (login gráfico)
+    tee /etc/xdg/autostart/axxon-guardian.desktop > /dev/null << 'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Axxon One Guardian
+Exec=/usr/local/bin/axxon-guardian.sh
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+Terminal=false
+Comment=Keeps Axxon One Client running at all times
+DESKTOP
+
+    # Systemd user service — camada adicional (cria symlink para habilitar sem dbus)
+    local svc_dir="$real_home/.config/systemd/user"
+    local wants_dir="$svc_dir/graphical-session.target.wants"
+    sudo -u "$real_user" mkdir -p "$wants_dir"
+
+    sudo -u "$real_user" tee "$svc_dir/axxon-guardian.service" > /dev/null << 'SERVICE'
+[Unit]
+Description=Axxon One Client Guardian
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/axxon-guardian.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
+SERVICE
+
+    sudo -u "$real_user" ln -sf \
+        "$svc_dir/axxon-guardian.service" \
+        "$wants_dir/axxon-guardian.service"
+
+    grn "  Script: /usr/local/bin/axxon-guardian.sh"
+    grn "  Autostart: /etc/xdg/autostart/axxon-guardian.desktop"
+    grn "  Serviço: $svc_dir/axxon-guardian.service"
+    echo
+}
+
 # ── passo: instalação dos pacotes .deb ───────────────────────────────────────
 if ckpt_is_done "install_pkgs"; then
     ckpt_skip "install_pkgs" "Instalação dos pacotes .deb"
@@ -705,6 +829,13 @@ if [[ "$type" == "client" ]]; then
     else
         force_xorg
         ckpt_done "force_xorg" "Desabilitar Wayland"
+    fi
+
+    if ckpt_is_done "setup_watchdog"; then
+        ckpt_skip "setup_watchdog" "Axxon Guardian (watchdog)"
+    else
+        setup_axxon_watchdog
+        ckpt_done "setup_watchdog" "Axxon Guardian (watchdog)"
     fi
 
 fi
