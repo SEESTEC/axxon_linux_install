@@ -1,872 +1,705 @@
-#!/bin/bash
-
-set -euo pipefail
-
-# ── formatação ────────────────────────────────────────────────────────────────
-bold() { printf '\033[1m%s\033[0m' "$*"; }
-red()  { printf '\033[0;31m%s\033[0m\n' "$*"; }
-grn()  { printf '\033[0;32m%s\033[0m\n' "$*"; }
-info() { printf '\033[0;36m%s\033[0m\n' "$*"; }
-warn() { printf '\033[0;33m%s\033[0m\n' "$*"; }
-
-abort() {
-    echo
-    red "Instalação encerrada."
-    echo
-    exit 0
-}
-
-# Retorna 0 = sim | 1 = não | exit = qualquer outra tecla
-confirm() {
-    local ans
-    read -rp "$(bold "$1") [S/N ou qualquer outra tecla para sair]: " ans
-    case "$ans" in
-        [Ss]) return 0 ;;
-        [Nn]) return 1 ;;
-        *)    abort ;;
-    esac
-}
-
-# ── sistema de checkpoint ─────────────────────────────────────────────────────
+#!/usr/bin/env bash
 #
-# Arquivo: /var/tmp/axxon_install.checkpoint
-# Diretório de instalação persistente: /var/tmp/axxon_install/
+# Axxon One — instalador Linux (Server ou Client)
+# SEESTEC — Engenharia e Tecnologia
 #
-# Se o download ou qualquer passo for interrompido, execute o script novamente
-# com conexão estável — o installer lê o checkpoint e retoma de onde parou.
+# Requisitos: Ubuntu 24.04 LTS ou superior, acesso root (sudo) e internet.
 #
-CKPT_FILE="/var/tmp/axxon_install.checkpoint"
-INSTALL_DIR="/var/tmp/axxon_install"
-ZIP_FILE="$INSTALL_DIR/axxon-one.zip"
-PKG_DIR="$INSTALL_DIR/axxon"
-LOG_FILE="/var/tmp/axxon_install.log"
+# Uso:
+#   sudo bash install.sh                 # menu interativo
+#   sudo bash install.sh --server        # instala o Axxon One Server
+#   sudo bash install.sh --client        # instala o Axxon One Client
+#   sudo bash install.sh --server -y     # sem perguntas (valores padrão)
+#   sudo bash install.sh --help          # todas as opções
+#
+# A instalação é dividida em etapas com checkpoint. Se algo falhar (queda de
+# internet, falta de energia, Ctrl+C...), basta executar o script novamente:
+# ele retoma da etapa onde parou. Downloads parciais são reaproveitados pelo apt.
 
-# Grava ou atualiza uma chave no checkpoint (operação atômica via tmp)
-ckpt_set() {
-    local key="$1" val="$2"
-    mkdir -p "$(dirname "$CKPT_FILE")"
-    touch "$CKPT_FILE"
-    local tmp; tmp=$(mktemp)
-    grep -v "^${key}=" "$CKPT_FILE" > "$tmp" 2>/dev/null || true
-    printf '%s=%s\n' "$key" "$val" >> "$tmp"
-    mv "$tmp" "$CKPT_FILE"
-}
-
-# Lê o valor de uma chave do checkpoint
-ckpt_get() {
-    grep "^${1}=" "$CKPT_FILE" 2>/dev/null | cut -d= -f2- || true
-}
-
-# Marca um passo como concluído
-ckpt_done() {
-    ckpt_set "$1" "done"
-    grn "  [✓] ${2:-$1}"
-}
-
-# Retorna 0 se o passo já foi concluído
-ckpt_is_done() {
-    [[ -f "$CKPT_FILE" ]] && grep -qxF "${1}=done" "$CKPT_FILE" 2>/dev/null
-}
-
-# Avisa que o passo foi pulado (já concluído)
-ckpt_skip() {
-    warn "  [→] ${2:-$1} — já concluído, pulando."
-}
-
-# Remove checkpoint e diretório de instalação (chamado ao final com sucesso)
-ckpt_clear() {
-    rm -f "$CKPT_FILE"
-    rm -rf "$INSTALL_DIR"
-}
-
-# Exibe o status dos passos em um quadro
-_ckpt_row() {
-    local step="$1" label="$2" type_filter="${3:-}"
-    # pula passos exclusivos de um tipo se o tipo salvo for diferente
-    if [[ -n "$type_filter" ]]; then
-        local saved_type; saved_type=$(ckpt_get TYPE)
-        [[ "$saved_type" == "$type_filter" ]] || return 0
-    fi
-    if ckpt_is_done "$step"; then
-        printf "  ✓  %-46s \n" "$label"
-    else
-        printf "  ○  %-46s \n" "$label"
-    fi
-}
-
-ckpt_show_status() {
-    local saved_type; saved_type=$(ckpt_get TYPE)
-    local saved_version; saved_version=$(ckpt_get VERSION)
-    echo
-    echo "╔══════════════════════════════════════════════════════╗"
-    echo "║      AXXON ONE — Instalação Anterior Detectada       ║"
-    echo "╚══════════════════════════════════════════════════════╝"
-    printf "  Tipo    : %-41s\n" "${saved_type:-?}"
-    printf "  Versão  : %-41s\n" "${saved_version:-?}"
-    echo
-    echo "  Progresso dos passos:"
-    _ckpt_row apt_update       "Atualização do sistema"
-    _ckpt_row bashrc           "Aliases no .bashrc"
-    _ckpt_row download_zip     "Download do pacote Axxon"   "client"
-    _ckpt_row extract_zip      "Extração do pacote"          "client"
-    _ckpt_row setup_repo       "Repositório e chave GPG"
-    _ckpt_row install_pkgs     "Instalação dos pacotes"
-    _ckpt_row download_scripts "Scripts screenREC"          "client"
-    _ckpt_row cleanup_config   "Retenção de gravações"      "client"
-    _ckpt_row setup_autostart  "Autostart screenREC"        "client"
-    _ckpt_row setup_samba      "Servidor Samba"             "client"
-    _ckpt_row save_sudo_pass   "Credencial sudo"
-    _ckpt_row force_xorg       "Desabilitar Wayland"        "client"
-    _ckpt_row setup_watchdog   "Axxon Guardian (watchdog)"  "client"
-    echo
-}
-
-# ── verificação de conexão ────────────────────────────────────────────────────
-checkConnection() {
-    i=1;
-    while ! ping -c 1 -W 1 8.8.8.8 > /dev/null 2>&1; do
-        echo -ne "\r\033[KPor favor, conecte-se à internet para seguir. \e[1;90mPressione \"x\" para encerrar\e[0m ou \e[1maguarde até re-estabelecer conexão [tentativa(s): $i]\e[0m";
-        ((i++));
-        read -t 1 -n 1 key;
-        if [[ "$key" == 'x' ]]; then
-            echo -e "\nCancelado pelo usuário";
-            exit 1;
-        fi
-        sleep 3;
-        if [[ ${#i} -eq 60 ]]; then
-            echo -e "\nLimite de tempo excedido, conecte-se à internet antes de executar o script";
-            exit 1;
-        elif ping -c 1 -W 1 8.8.8.8 > /dev/null 2>&1; then
-            echo -e "\nConexão estabelecida com sucesso!";
-            return 0;
-        fi
-    done
-    return 0;
-}
-
-# ── log de instalação ─────────────────────────────────────────────────────────
-mkdir -p "$(dirname "$LOG_FILE")"
-exec > >(tee -a "$LOG_FILE") 2>&1
-trap 'printf "\n[%s] === Instalação encerrada (exit: %s) ===\n" "$(date +"%F %T")" "$?"' EXIT
-printf '[%s] === Instalação iniciada ===\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-
-checkConnection;
-
-# ── leitura de SO (verificação adiada — depende da versão escolhida) ──────────
-os_id=$(grep '^ID=' /etc/os-release | cut -d= -f2)
-os_version=$(grep '^VERSION_ID=' /etc/os-release | tr -d '"' | cut -d= -f2)
-
-# ── leitura / retomada de checkpoint ─────────────────────────────────────────
-type=""
-version=""
-_resuming=false
-
-if [[ -f "$CKPT_FILE" ]] && grep -q "^TYPE=" "$CKPT_FILE" 2>/dev/null; then
-    ckpt_show_status
-
-    echo "  Uma instalação anterior foi encontrada."
-    echo "  Deseja retomar de onde parou? (N = iniciar do zero)"
-    echo
-    if confirm "Retomar instalação?"; then
-        _resuming=true
-        type=$(ckpt_get TYPE)
-        version=$(ckpt_get VERSION)
-        info "Retomando: Axxon One $version ($type)."
-        echo
-    else
-        info "Descartando checkpoint anterior e iniciando do zero..."
-        ckpt_clear
-    fi
+# Reexecuta com bash caso tenha sido chamado via "sh install.sh"
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
 fi
 
-# ── menus de tipo e versão ────────────────────────────────────────────────────
-choose_type() {
-    local opt
+set -uo pipefail
+
+# ── constantes ────────────────────────────────────────────────────────────────
+readonly SCRIPT_VERSION="2.0.0"
+readonly MIN_UBUNTU="24.04"
+
+readonly REPO_URL="https://download.axxonsoft.com/debian-repository"
+readonly REPO_HOST="download.axxonsoft.com"
+readonly KEY_URL="$REPO_URL/info@axxonsoft.com.gpg.key"
+readonly KEYRING="/etc/apt/keyrings/axxonsoft.gpg"
+readonly SOURCES_FILE="/etc/apt/sources.list.d/axxonsoft.list"
+readonly PREFS_FILE="/etc/apt/preferences.d/axxonsoft"
+readonly LEGACY_KEY="/etc/apt/trusted.gpg.d/axxonsoft.gpg"
+readonly MONO_VERSION="6.4.0.198-0xamarin3+debian9b1"
+
+readonly STATE_DIR="/var/lib/axxon-install"
+readonly STATE_FILE="$STATE_DIR/state"
+readonly BACKUP_DIR="$STATE_DIR/backup"
+readonly LOG_FILE="/var/log/axxon-install.log"
+readonly LOCK_FILE="/run/lock/axxon-install.lock"
+
+readonly MIN_FREE_GB=5
+readonly SERVICE_TIMEOUT=180
+
+# apt com retentativas de download e espera pelo lock do dpkg (ex.: unattended-upgrades)
+readonly -a APT=(apt-get -y
+    -o Acquire::Retries=5
+    -o DPkg::Lock::Timeout=600
+    -o Dpkg::Options::=--force-confdef
+    -o Dpkg::Options::=--force-confold)
+
+# ── opções ────────────────────────────────────────────────────────────────────
+TYPE=""          # server | client
+ASSUME_YES=false # -y: sem perguntas, debconf com valores padrão
+DOMAIN=""        # domínio do Axxon One Server (opcional)
+RESET=false
+REMOVE=false
+
+# ── saída ─────────────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+    C_RED=$'\033[0;31m' C_GRN=$'\033[0;32m' C_YLW=$'\033[0;33m'
+    C_CYN=$'\033[0;36m' C_BLD=$'\033[1m'    C_RST=$'\033[0m'
+else
+    C_RED="" C_GRN="" C_YLW="" C_CYN="" C_BLD="" C_RST=""
+fi
+
+_log() {
+    [[ -w "$LOG_FILE" ]] || return 0
+    printf '[%s] %s\n' "$(date '+%F %T')" "$*" >> "$LOG_FILE"
+}
+info() { printf '%s%s%s\n' "$C_CYN" "$*" "$C_RST"; _log "INFO  $*"; }
+ok()   { printf '%s  [✓] %s%s\n' "$C_GRN" "$*" "$C_RST"; _log "OK    $*"; }
+warn() { printf '%s  [!] %s%s\n' "$C_YLW" "$*" "$C_RST" >&2; _log "WARN  $*"; }
+err()  { printf '%s  [✗] %s%s\n' "$C_RED" "$*" "$C_RST" >&2; _log "ERROR $*"; }
+
+die() {
+    err "$1"
+    [[ -n "${2:-}" ]] && printf '      %s\n' "$2" >&2
+    exit "${3:-1}"
+}
+
+usage() {
+    cat <<EOF
+Axxon One — instalador Linux v$SCRIPT_VERSION
+
+Uso: sudo bash $(basename "$0") [opções]
+
+  --server          Instala o Axxon One Server (pacote axxon-one)
+  --client          Instala o Axxon One Client (pacote axxon-one-client)
+  -y, --yes         Não faz perguntas; o debconf usa os valores padrão
+  --domain NOME     Domínio do Axxon One Server (pode ficar em branco)
+  --reset           Descarta o checkpoint e refaz todas as etapas
+  --remove          Remove o Axxon One, o repositório e o checkpoint
+  -h, --help        Mostra esta ajuda
+
+Sem --server/--client, um menu pergunta o que instalar.
+Log completo: $LOG_FILE
+EOF
+}
+
+parse_args() {
+    while (($#)); do
+        case "$1" in
+            --server)   TYPE="server" ;;
+            --client)   TYPE="client" ;;
+            -y|--yes)   ASSUME_YES=true ;;
+            --domain)   [[ $# -ge 2 ]] || die "--domain exige um valor."
+                        DOMAIN="$2"; shift ;;
+            --domain=*) DOMAIN="${1#*=}" ;;
+            --reset)    RESET=true ;;
+            --remove)   REMOVE=true ;;
+            -h|--help)  usage; exit 0 ;;
+            *)          usage >&2; die "Opção desconhecida: $1" ;;
+        esac
+        shift
+    done
+}
+
+# ── perguntas ─────────────────────────────────────────────────────────────────
+has_tty() { [[ -t 0 ]]; }
+
+# confirm "pergunta" [padrão S|N]
+confirm() {
+    local question="$1" default="${2:-S}" ans hint
+    $ASSUME_YES && return 0
+    has_tty || die "Sem terminal interativo para confirmar: \"$question\"." "Use -y para executar sem perguntas."
+    [[ "$default" == "S" ]] && hint="[S/n]" || hint="[s/N]"
     while true; do
-        echo
-        echo "╔════════════════════════════════════════╗"
-        echo "║     AXXON ONE — Instalador Linux       ║"
-        echo "╠════════════════════════════════════════╣"
-        echo "║  1) Server                             ║"
-        echo "║  2) Client                             ║"
-        echo "║  3) Sair                               ║"
-        echo "╚════════════════════════════════════════╝"
-        read -rp "Escolha o tipo de instalação [1-3]: " opt
-        case "$opt" in
-            1) type="server"; return ;;
-            2) type="client"; return ;;
-            3) abort ;;
-            *) echo; red "Opção inválida. Tente novamente." ;;
+        read -rp "${C_BLD}${question}${C_RST} $hint: " ans || exit 1
+        ans="${ans:-$default}"
+        case "${ans,,}" in
+            s|sim|y|yes) return 0 ;;
+            n|nao|não|no) return 1 ;;
+            *) warn "Responda S ou N." ;;
         esac
     done
 }
 
-if [[ "$_resuming" == false ]]; then
-    while true; do
-        choose_type
-        confirm "Confirma instalação do tipo $(bold "$type")?" && break
+# ── verificações de ambiente ──────────────────────────────────────────────────
+check_os() {
+    local id="" version="" pretty=""
+    if [[ -r /etc/os-release ]]; then
+        id=$(. /etc/os-release && printf '%s' "${ID:-}")
+        version=$(. /etc/os-release && printf '%s' "${VERSION_ID:-}")
+        pretty=$(. /etc/os-release && printf '%s' "${PRETTY_NAME:-}")
+    fi
+
+    if [[ "${id,,}" != "ubuntu" || -z "$version" ]] ||
+       ! printf '%s\n%s\n' "$MIN_UBUNTU" "$version" | sort -V -C; then
+        echo
+        err "Sistema operacional incompatível: ${pretty:-desconhecido}"
+        printf '      Esta instalação do Axxon One requer %sUbuntu %s LTS ou superior%s.\n' \
+            "$C_BLD" "$MIN_UBUNTU" "$C_RST" >&2
+        printf '      Instale/atualize a distro para Ubuntu %s+ e execute o instalador novamente.\n\n' \
+            "$MIN_UBUNTU" >&2
+        exit 2
+    fi
+}
+
+ensure_root() {
+    [[ $EUID -eq 0 ]] && return 0
+    local self
+    self=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)
+    [[ -f "$self" ]] || die "Execute o instalador como root: sudo bash install.sh"
+    command -v sudo >/dev/null || die "sudo não encontrado. Execute como root."
+    info "Permissão de administrador necessária — solicitando via sudo..."
+    exec sudo bash "$self" "$@"
+}
+
+acquire_lock() {
+    mkdir -p "$(dirname "$LOCK_FILE")"
+    exec 9>"$LOCK_FILE"
+    flock -n 9 || die "Outra execução do instalador já está em andamento." \
+        "Aguarde ela terminar ou encerre-a antes de continuar."
+}
+
+init_log() {
+    touch "$LOG_FILE" && chmod 640 "$LOG_FILE"
+    printf '\n[%s] ===== Instalador Axxon One v%s — args: %s =====\n' \
+        "$(date '+%F %T')" "$SCRIPT_VERSION" "${ORIG_ARGS:-}" >> "$LOG_FILE"
+}
+
+check_arch() {
+    local arch
+    arch=$(dpkg --print-architecture)
+    [[ "$arch" == "amd64" || "$arch" == "arm64" ]] ||
+        die "Arquitetura não suportada: $arch (o repositório Axxon publica amd64 e arm64)."
+}
+
+check_systemd() {
+    [[ -d /run/systemd/system ]] && return 0
+    die "O Axxon One Server precisa do systemd ativo e ele não está em execução." \
+        "No WSL: adicione [boot] systemd=true em /etc/wsl.conf e rode 'wsl --shutdown' no Windows."
+}
+
+check_disk() {
+    local path avail_kb
+    for path in /var/cache/apt /opt /; do
+        [[ -d "$path" ]] || continue
+        avail_kb=$(df -Pk "$path" | awk 'NR==2 {print $4}')
+        if ((avail_kb < MIN_FREE_GB * 1024 * 1024)); then
+            die "Espaço insuficiente em $path: $((avail_kb / 1024 / 1024)) GB livres." \
+                "São necessários pelo menos $MIN_FREE_GB GB livres."
+        fi
     done
-
-    version="3.0"
-
-    # Salva tipo e versão no checkpoint logo após confirmação
-    mkdir -p "$INSTALL_DIR"
-    ckpt_set "TYPE"    "$type"
-    ckpt_set "VERSION" "$version"
-fi
-
-# ── verificação de SO (mínimo Ubuntu 24.04) ──────────────────────────────────
-if [[ "$os_id" != "ubuntu" ]] || ! printf '%s\n%s\n' "24.04" "$os_version" | sort -V -C 2>/dev/null; then
-    echo
-    red "Sistema operacional incompatível: $os_id $os_version"
-    echo "  Axxon One $version requer Ubuntu 24.04 LTS ou superior."
-    echo
-    exit 1
-fi
-
-# ── URL de download (client only) ────────────────────────────────────────────
-url=""
-[[ "$type" == "client" ]] && \
-    url="https://dl.axxonsoft.com/software/Axxon-One/Axxon-One/3.0.0.46/linux-amd64-client.zip"
-
-mkdir -p "$INSTALL_DIR"
-
-# ── passo: atualização do sistema e dependências ──────────────────────────────
-if ckpt_is_done "apt_update"; then
-    ckpt_skip "apt_update" "Atualização do sistema"
-else
-    echo
-    info "Atualizando sistema e instalando dependências..."
-    echo
-    apt-get update && apt-get upgrade -y
-    apt-get install -y unzip wget
-    ckpt_done "apt_update" "Atualização do sistema"
-fi
-
-# ── passo: aliases e banner de login no ~/.bashrc ─────────────────────────────
-if ckpt_is_done "bashrc"; then
-    ckpt_skip "bashrc" "Aliases no .bashrc"
-else
-    _brc_user="${SUDO_USER:-$USER}"
-    _brc_home=$(getent passwd "$_brc_user" | cut -d: -f6)
-    if ! grep -q "SEESTEC - ENGENHARIA E TECNOLOGIA" "$_brc_home/.bashrc" 2>/dev/null; then
-
-        # ── header comum (server + client) ────────────────────────────────────
-        cat >> "$_brc_home/.bashrc" << BASHRC
-
-# ── SEESTEC - ENGENHARIA E TECNOLOGIA ─────────────────────────────────────────
-BASHRC
-
-        # ── aliases exclusivos do server ──────────────────────────────────────
-        if [[ "$type" == "server" ]]; then
-            cat >> "$_brc_home/.bashrc" << BASHRC
-
-# Axxon One — controle do serviço
-alias axxon-start="sudo systemctl start axxon-one"
-alias axxon-stop="sudo systemctl stop axxon-one"
-alias axxon-restart="sudo systemctl restart axxon-one"
-alias axxon-status="sudo systemctl status axxon-one"
-BASHRC
-        fi
-
-        # ── aliases exclusivos do client ──────────────────────────────────────
-        if [[ "$type" == "client" ]]; then
-            cat >> "$_brc_home/.bashrc" << BASHRC
-
-# Identificação e busca de gravações
-alias ask-tag="python3 \$HOME/screenREC/ask_tag.py"
-alias find-rec="python3 \$HOME/screenREC/find_rec.py"
-
-# screenREC — controle
-alias screenREC-start="nohup bash \$HOME/screenREC/screenREC.sh >>/tmp/screenrec.log 2>&1 &"
-alias screenREC-stop="pkill -TERM -f screenREC.sh 2>/dev/null; pkill -INT -f 'ffmpeg.*x11grab' 2>/dev/null; echo 'Encerrado.'"
-alias screenREC-status="pgrep -fa ffmpeg | grep x11grab || echo 'Nenhuma gravacao ativa.'"
-alias screenREC-live="tail -f /tmp/screenrec.log"
-
-# screenREC — log de arquivamento (zip_daily)
-alias screenREC-log="cat /tmp/screenrec_zip.log"
-alias screenREC-show="tail -f /tmp/screenrec_zip.log"
-alias screenREC-ok="grep 'Concluido' /tmp/screenrec_zip.log"
-alias screenREC-error="grep 'ERRO' /tmp/screenrec_zip.log"
-
-# screenREC — diagnóstico
-alias screenREC-session="set | grep -E 'XDG_SESSION_TYPE|^DISPLAY='"
-alias screenREC-monitors="xrandr --listmonitors"
-alias screenREC-audio="pactl info"
-alias screenREC-audio-list="pactl list short sources"
-alias screenREC-audio-test="ffmpeg -f pulse -i default -t 5 /tmp/teste_audio.mp3"
-alias screenREC-serial="printf 'DMI: '; cat /sys/class/dmi/id/product_serial 2>/dev/null; printf '\nmachine-id: '; head -c 12 /etc/machine-id; echo"
-alias screenREC-folder="ls -la \$HOME/REC_SHARE/"
-alias screenREC-autostart="cat \$HOME/.config/autostart/screenREC.desktop"
-alias screenREC-cron="crontab -l 2>/dev/null | grep screenREC || echo 'Nenhum cron screenREC registrado.'"
-alias screenREC-disk="df -h \$HOME/REC_SHARE"
-alias screenREC-cleanup-log="cat /tmp/screenrec_cleanup.log"
-alias screenREC-cleanup-show="tail -f /tmp/screenrec_cleanup.log"
-
-# screenREC — configuração
-alias screenREC-cleanup-config="bash \$HOME/screenREC/cleanup_old.sh --config"
-
-# Samba — controle e diagnóstico
-alias samba-status="systemctl status smbd nmbd"
-alias samba-restart="sudo systemctl restart smbd nmbd"
-alias samba-users="sudo pdbedit -L"
-alias samba-passwd="sudo smbpasswd \$USER"
-alias samba-test="smbclient //localhost/REC_SHARE -U \$USER"
-BASHRC
-        fi
-
-        # ── banner de login — server ───────────────────────────────────────────
-        if [[ "$type" == "server" ]]; then
-            cat >> "$_brc_home/.bashrc" << BASHRC
-
-echo "
----------- AXXON ONE ${type^^} - ${version} ----------
---------- IPV4: \$(hostname -I)
---------- HOST:
-\$(hostnamectl)
-\$(grep '^SUDO_PASS=' \$HOME/screenREC/.env 2>/dev/null | cut -d= -f2- | sudo -S systemctl status axxon-one 2>/dev/null)
-
-# ── SEESTEC - ENGENHARIA E TECNOLOGIA ─────────────────────────────────────────
-
-# Axxon One — controle do serviço
-  axxon-start              # inicia o serviço Axxon One
-  axxon-stop               # para o serviço Axxon One
-  axxon-restart            # reinicia o serviço Axxon One
-  axxon-status             # exibe status do serviço Axxon One
-"
-BASHRC
-        fi
-
-        # ── banner de login — client ───────────────────────────────────────────
-        if [[ "$type" == "client" ]]; then
-            cat >> "$_brc_home/.bashrc" << BASHRC
-
-echo "
----------- AXXON ONE ${type^^} - ${version} ----------
---------- IPV4: \$(hostname -I)
---------- HOST:
-\$(hostnamectl)
-\$(grep '^SUDO_PASS=' \$HOME/screenREC/.env 2>/dev/null | cut -d= -f2- | sudo -S systemctl status axxon-one 2>/dev/null)
-
-# ── SEESTEC - ENGENHARIA E TECNOLOGIA ─────────────────────────────────────────
-
-# Identificação e busca de gravações
-  ask-tag                  # identifica câmera/tag de uma gravação
-  find-rec                 # busca gravações por data e hora
-
-# screenREC — controle
-  screenREC-start          # inicia gravação de tela em segundo plano
-  screenREC-stop           # encerra a gravação de tela
-  screenREC-status         # mostra se há gravação ativa
-  screenREC-live           # acompanha o log em tempo real
-
-# screenREC — log de arquivamento (zip_daily)
-  screenREC-log            # exibe o log de arquivamento
-  screenREC-show           # acompanha o log de arquivamento em tempo real
-  screenREC-ok             # filtra entradas de sucesso no log
-  screenREC-error          # filtra erros no log de arquivamento
-
-# screenREC — diagnóstico
-  screenREC-session        # exibe tipo de sessão gráfica (X11/Wayland)
-  screenREC-monitors       # lista monitores disponíveis
-  screenREC-audio          # exibe informações do servidor de áudio
-  screenREC-audio-list     # lista fontes de áudio disponíveis
-  screenREC-audio-test     # grava 5s de áudio para teste
-  screenREC-serial         # exibe serial DMI e machine-id
-  screenREC-folder         # lista arquivos na pasta de gravações
-  screenREC-autostart      # exibe configuração de autostart
-  screenREC-cron           # exibe crons registrados para screenREC
-  screenREC-disk           # mostra espaço em disco da pasta de gravações
-  screenREC-cleanup-log    # exibe log de limpeza de gravações antigas
-  screenREC-cleanup-show   # acompanha log de limpeza em tempo real
-
-# screenREC — configuração
-  screenREC-cleanup-config # define o período de retenção das gravações (.zip)
-
-# Samba — controle e diagnóstico
-  samba-status             # exibe status dos serviços Samba
-  samba-restart            # reinicia os serviços Samba
-  samba-users              # lista usuários Samba
-  samba-passwd             # altera senha Samba do usuário atual
-  samba-test               # testa conexão Samba local
-"
-BASHRC
-        fi
-
-    fi
-    ckpt_done "bashrc" "Aliases no .bashrc"
-fi
-
-# ── passos: download e extração (client only) ────────────────────────────────
-if [[ "$type" == "client" ]]; then
-
-    if ckpt_is_done "download_zip" && [[ -s "$ZIP_FILE" ]]; then
-        ckpt_skip "download_zip" "Download do pacote Axxon"
-    else
-        if ckpt_is_done "download_zip" && [[ ! -s "$ZIP_FILE" ]]; then
-            warn "Arquivo de download não encontrado. Baixando novamente..."
-            ckpt_set "download_zip" "pending"
-            ckpt_set "extract_zip"  "pending"
-        fi
-        echo
-        info "Baixando Axxon One ${version} client..."
-        echo "  URL: $url"
-        echo
-        wget -c --progress=bar:force:noscroll -O "$ZIP_FILE" "$url"
-        [[ -s "$ZIP_FILE" ]] || { red "Download falhou ou arquivo vazio."; exit 1; }
-        ckpt_done "download_zip" "Download do pacote Axxon"
-    fi
-
-    if ckpt_is_done "extract_zip" && [[ -d "$PKG_DIR" ]]; then
-        ckpt_skip "extract_zip" "Extração do pacote"
-    else
-        echo
-        info "Extraindo pacote..."
-        rm -rf "$PKG_DIR"
-        unzip -q "$ZIP_FILE" -d "$PKG_DIR"
-        ckpt_done "extract_zip" "Extração do pacote"
-    fi
-
-fi
-
-# ── repositório e GPG (compartilhados) ───────────────────────────────────────
-setup_repo() {
-    if [[ ! -f /etc/apt/sources.list.d/axxonsoft.list ]]; then
-        info "Configurando repositório Axxon..."
-        echo 'deb http://download.axxonsoft.com/debian-repository buster main backports/main' \
-            | tee -a /etc/apt/sources.list.d/axxonsoft.list > /dev/null
-        echo 'deb http://download.axxonsoft.com/debian-repository stretch backports/main' \
-            | tee -a /etc/apt/sources.list.d/axxonsoft.list > /dev/null
-        echo 'deb http://download.axxonsoft.com/debian-repository stable main' \
-            | tee -a /etc/apt/sources.list.d/axxonsoft.list > /dev/null
-    fi
-
-    if [[ ! -f /etc/apt/trusted.gpg.d/axxonsoft.gpg ]]; then
-        info "Importando chave GPG do repositório Axxon..."
-        wget --quiet -O - "http://download.axxonsoft.com/debian-repository/info@axxonsoft.com.gpg.key" \
-            | gpg --dearmor -o /etc/apt/trusted.gpg.d/axxonsoft.gpg
-        apt-get update -q
-    fi
 }
 
-# ── passo: repositório e GPG ──────────────────────────────────────────────────
-if ckpt_is_done "setup_repo"; then
-    ckpt_skip "setup_repo" "Repositório e chave GPG"
-else
-    setup_repo
-    ckpt_done "setup_repo" "Repositório e chave GPG"
-fi
-
-# ── instalação client (apenas pacotes .deb + mono) ────────────────────────────
-install_client_pkgs() {
-    local pkg_dir="$1"
-
-    local -a bin_debs client_debs
-    shopt -s nullglob
-    bin_debs=("$pkg_dir"/axxon-one-client-bin*.deb)
-    client_debs=("$pkg_dir"/axxon-one-client_*.deb)
-    shopt -u nullglob
-
-    if [[ ${#bin_debs[@]} -eq 0 || ${#client_debs[@]} -eq 0 ]]; then
-        red "Pacotes axxon-one-client não encontrados em $pkg_dir."
-        red "Verifique se o download foi concluído corretamente."
-        exit 1
-    fi
-
-    info "Preparando dependências Mono..."
-    apt-get purge -y 'mono-*' 'libmono-*' 2>/dev/null || true
-    apt-get autoremove -y
-    apt-get install -y mono-complete -t stretch
-
-    info "Instalando Axxon One Client (binários)..."
-    dpkg -i "${bin_debs[@]}"    || apt-get install -fy --no-upgrade
-
-    info "Instalando Axxon One Client..."
-    dpkg -i "${client_debs[@]}" || apt-get install -fy --no-upgrade
-}
-
-# ── download scripts companheiros (client only) ──────────────────────────────
-download_scripts() {
-    local real_user="${SUDO_USER:-$USER}"
-    local real_home
-    real_home=$(getent passwd "$real_user" | cut -d: -f6)
-    local dest="$real_home/screenREC"
-    local base_url="https://raw.githubusercontent.com/SEESTEC/axxon_linux_install/main/screenREC"
-
-    info "Baixando scripts companheiros para $dest..."
-    echo
-
-    sudo -u "$real_user" mkdir -p "$dest"
-
-    sudo -u "$real_user" wget -c -v -O "$dest/screenREC.sh"    "$base_url/screenREC.sh"
-    sudo -u "$real_user" wget -c -v -O "$dest/zip_daily.sh"    "$base_url/zip_daily.sh"
-    sudo -u "$real_user" wget -c -v -O "$dest/cleanup_old.sh"  "$base_url/cleanup_old.sh"
-    sudo -u "$real_user" wget -c -v -O "$dest/setup_samba.sh"  "$base_url/setup_samba.sh"
-    sudo -u "$real_user" wget -c -v -O "$dest/ask_tag.py"      "$base_url/ask_tag.py"
-    sudo -u "$real_user" wget -c -v -O "$dest/find_rec.py"     "$base_url/find_rec.py"
-
-    sudo -u "$real_user" chmod +x "$dest/screenREC.sh" "$dest/zip_daily.sh" \
-                                   "$dest/cleanup_old.sh" "$dest/setup_samba.sh" \
-                                   "$dest/ask_tag.py" "$dest/find_rec.py"
-
-    grn "  screenREC.sh   → $dest/screenREC.sh"
-    grn "  zip_daily.sh   → $dest/zip_daily.sh"
-    grn "  cleanup_old.sh → $dest/cleanup_old.sh"
-    grn "  setup_samba.sh → $dest/setup_samba.sh"
-    grn "  ask_tag.py     → $dest/ask_tag.py"
-    grn "  find_rec.py    → $dest/find_rec.py"
-    echo
-}
-
-# ── autostart do screenREC no login (client only) ────────────────────────────
-setup_autostart() {
-    local real_user="${SUDO_USER:-$USER}"
-    local real_home
-    real_home=$(getent passwd "$real_user" | cut -d: -f6)
-    local script="$real_home/screenREC/screenREC.sh"
-    local autostart_dir="$real_home/.config/autostart"
-
-    info "Configurando screenREC para início automático no login..."
-    echo
-
-    sudo -u "$real_user" mkdir -p "$autostart_dir"
-    sudo -u "$real_user" tee "$autostart_dir/screenREC.desktop" > /dev/null << DESKTOP
-[Desktop Entry]
-Type=Application
-Name=screenREC — Axxon Gravação de Tela
-Exec=bash -c 'nohup bash $script >> /tmp/screenrec.log 2>&1 &'
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-Terminal=false
-DESKTOP
-
-    grn "  Autostart criado: $autostart_dir/screenREC.desktop"
-    grn "  Log em: /tmp/screenrec.log"
-    echo
-}
-
-# ── salvar senha sudo ────────────────────────────────────────────────────────
-save_sudo_password() {
-    local real_user="${SUDO_USER:-$USER}"
-    local real_home
-    real_home=$(getent passwd "$real_user" | cut -d: -f6)
-    local env_file="$real_home/screenREC/.env"
-    sudo -u "$real_user" mkdir -p "$real_home/screenREC"
-
-    echo
-    info "Configurando credencial sudo para scripts automatizados..."
-    echo
-
-    local pass1 pass2
-    while true; do
-        read -rsp "  Senha sudo do usuário '$real_user': " pass1
-        echo
-        read -rsp "  Confirme a senha: " pass2
-        echo
-        if [[ "$pass1" == "$pass2" ]]; then
-            break
+# Aguarda conectividade com o repositório Axxon (até ~5 min)
+check_network() {
+    local i
+    for ((i = 1; i <= 30; i++)); do
+        if timeout 8 bash -c "exec 3<>/dev/tcp/$REPO_HOST/443" 2>/dev/null; then
+            return 0
         fi
-        red "  As senhas não coincidem. Tente novamente."
-        echo
+        ((i == 1)) && warn "Sem acesso a $REPO_HOST. Aguardando conexão (Ctrl+C para cancelar)..."
+        sleep 10
     done
-
-    local val
-    val=$(printf '%q' "$pass1")
-    printf 'SUDO_PASS=%s\n' "$val" | sudo -u "$real_user" tee "$env_file" > /dev/null
-    sudo -u "$real_user" chmod 600 "$env_file"
-
-    grn "  Credencial salva em $env_file (600)"
-    echo
+    die "Sem conexão com $REPO_HOST após várias tentativas." \
+        "Verifique a internet/proxy/DNS e execute o instalador novamente — ele retomará de onde parou."
 }
 
-# ── desabilitar wayland / forçar xorg (client only) ───────────────────────────
-force_xorg() {
-    info "Desabilitando Wayland e forçando Xorg (6 métodos)..."
-    echo
+# ── execução de comandos ──────────────────────────────────────────────────────
+# Executa um comando registrando a saída no log
+run() {
+    _log "\$ $*"
+    "$@" 2>&1 | tee -a "$LOG_FILE"
+    return "${PIPESTATUS[0]}"
+}
 
-    # 1. GDM3 custom.conf — WaylandEnable=false
-    local gdm_conf="/etc/gdm3/custom.conf"
-    mkdir -p "$(dirname "$gdm_conf")"
-    if [[ ! -f "$gdm_conf" ]]; then
-        printf '[daemon]\nWaylandEnable=false\n' | tee "$gdm_conf" > /dev/null
-    elif grep -q 'WaylandEnable' "$gdm_conf"; then
-        sed -i 's/#\?WaylandEnable=.*/WaylandEnable=false/' "$gdm_conf"
-    elif grep -q '^\[daemon\]' "$gdm_conf"; then
-        sed -i '/^\[daemon\]/a WaylandEnable=false' "$gdm_conf"
-    else
-        printf '\n[daemon]\nWaylandEnable=false\n' | tee -a "$gdm_conf" > /dev/null
-    fi
-    grn "  [1/6] $gdm_conf → WaylandEnable=false"
+# Executa um comando mantendo o terminal real (necessário para as telas do
+# debconf) e registra a sessão no log via script(1)
+run_tty() {
+    _log "\$ $* (terminal)"
+    local cmd
+    printf -v cmd '%q ' "$@"
+    script -q -e -a -c "$cmd" "$LOG_FILE" </dev/tty
+}
 
-    # 2. udev rule 61-gdm.rules → /dev/null
-    ln -sf /dev/null /etc/udev/rules.d/61-gdm.rules
-    udevadm control --reload-rules 2>/dev/null || true
-    grn "  [2/6] /etc/udev/rules.d/61-gdm.rules → /dev/null"
+# retry TENTATIVAS ESPERA comando...
+retry() {
+    local tries="$1" wait="$2" n
+    shift 2
+    for ((n = 1; n <= tries; n++)); do
+        "$@" && return 0
+        ((n < tries)) || break
+        warn "Falhou (tentativa $n/$tries). Nova tentativa em ${wait}s..."
+        sleep "$wait"
+    done
+    return 1
+}
 
-    # 3. AccountsService — sessão padrão do usuário = ubuntu-xorg
-    local real_user="${SUDO_USER:-$USER}"
-    local acct_file="/var/lib/AccountsService/users/$real_user"
-    mkdir -p /var/lib/AccountsService/users
-    if [[ -f "$acct_file" ]]; then
-        sed -i '/^Session=/d; /^XSession=/d' "$acct_file"
-        if grep -q '^\[User\]' "$acct_file"; then
-            sed -i 's/^\[User\]/[User]\nSession=ubuntu-xorg\nXSession=ubuntu/' "$acct_file"
+# ── checkpoint ────────────────────────────────────────────────────────────────
+st_get() {
+    [[ -f "$STATE_FILE" ]] || return 0
+    grep -m1 "^$1=" "$STATE_FILE" | cut -d= -f2- || true
+}
+
+st_set() {
+    local tmp
+    mkdir -p "$STATE_DIR"
+    tmp=$(mktemp "$STATE_DIR/.state.XXXXXX")
+    [[ -f "$STATE_FILE" ]] && grep -v "^$1=" "$STATE_FILE" > "$tmp"
+    printf '%s=%s\n' "$1" "$2" >> "$tmp"
+    mv -f "$tmp" "$STATE_FILE"
+    sync "$STATE_FILE" 2>/dev/null || true
+}
+
+st_clear() { rm -f "$STATE_FILE"; }
+
+# ── etapas ────────────────────────────────────────────────────────────────────
+#
+# Cada etapa tem: id | descrição | função que executa | função que valida.
+# Uma etapa marcada como concluída só é pulada se a validação ainda passar.
+#
+STEPS_COMMON=(
+    "legacy|Limpeza de configurações antigas do Axxon|do_legacy|chk_legacy"
+    "repair|Reparo de pacotes interrompidos|do_repair|chk_repair"
+    "base|Dependências do instalador (wget, gnupg)|do_base|chk_base"
+    "key|Chave GPG do repositório Axxon|do_key|chk_key"
+    "sources|Repositório Axxon e prioridades do apt|do_sources|chk_sources"
+    "update|Atualização da lista de pacotes|do_update|chk_update"
+    "download|Download dos pacotes|do_download|chk_download"
+    "install|Instalação do Axxon One|do_install|chk_install"
+)
+STEPS_SERVER=("service|Serviço axxon-one ativo|do_service|chk_service")
+
+steps_for_type() {
+    STEPS=("${STEPS_COMMON[@]}")
+    [[ "$TYPE" == "server" ]] && STEPS+=("${STEPS_SERVER[@]}")
+    return 0
+}
+
+package_name() { [[ "$TYPE" == "server" ]] && echo "axxon-one" || echo "axxon-one-client"; }
+
+pkg_installed() {
+    [[ "$(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null)" == "installed" ]]
+}
+
+# repair — conclui configurações de pacotes interrompidas (queda de energia, Ctrl+C)
+do_repair() {
+    export DEBIAN_FRONTEND=noninteractive
+    run dpkg --configure -a || return 1
+    run "${APT[@]}" --fix-broken install
+}
+chk_repair() { [[ -z "$(dpkg --audit 2>/dev/null)" ]]; }
+
+# base — somente o necessário para importar a chave do repositório
+readonly BASE_PKGS=(ca-certificates wget gnupg)
+do_base() {
+    export DEBIAN_FRONTEND=noninteractive
+    retry 3 15 run "${APT[@]}" update || return 1
+    retry 3 15 run "${APT[@]}" install --no-install-recommends "${BASE_PKGS[@]}"
+}
+chk_base() {
+    local p
+    for p in "${BASE_PKGS[@]}"; do pkg_installed "$p" || return 1; done
+}
+
+# legacy — entradas do repositório Axxon fora do arquivo gerenciado e chave antiga
+# do apt-key, deixadas por instaladores anteriores. Geram conflito de Signed-By.
+legacy_sources() {
+    grep -rlsE "^[^#]*${REPO_HOST//./\\.}" /etc/apt/sources.list /etc/apt/sources.list.d/ |
+        grep -vxF "$SOURCES_FILE" || true
+}
+do_legacy() {
+    local f stamp
+    stamp=$(date +%Y%m%d-%H%M%S)
+    mkdir -p "$BACKUP_DIR"
+    while read -r f; do
+        [[ -n "$f" ]] || continue
+        cp -a "$f" "$BACKUP_DIR/$(basename "$f").$stamp"
+        if [[ "$f" == /etc/apt/sources.list ]]; then
+            sed -i -E "/^[^#]*${REPO_HOST//./\\.}/ s/^/# desativado pelo instalador Axxon: /" "$f"
         else
-            printf '\n[User]\nSession=ubuntu-xorg\nXSession=ubuntu\n' | tee -a "$acct_file" > /dev/null
+            rm -f "$f"
         fi
+        info "  Entrada antiga removida: $f (backup em $BACKUP_DIR)"
+    done < <(legacy_sources)
+    # O arquivo gerenciado é sempre regerado na etapa "sources"
+    if [[ -f "$SOURCES_FILE" ]] && ! grep -q "signed-by=$KEYRING" "$SOURCES_FILE"; then
+        cp -a "$SOURCES_FILE" "$BACKUP_DIR/$(basename "$SOURCES_FILE").$stamp"
+        rm -f "$SOURCES_FILE"
+        info "  Lista antiga removida: $SOURCES_FILE"
+    fi
+    if [[ -f "$LEGACY_KEY" ]]; then
+        mv -f "$LEGACY_KEY" "$BACKUP_DIR/$(basename "$LEGACY_KEY").$stamp"
+        info "  Chave antiga removida: $LEGACY_KEY"
+    fi
+    return 0
+}
+chk_legacy() {
+    [[ -z "$(legacy_sources)" && ! -f "$LEGACY_KEY" ]] || return 1
+    [[ ! -f "$SOURCES_FILE" ]] || grep -q "signed-by=$KEYRING" "$SOURCES_FILE"
+}
+
+# key — chave em keyring dedicado (apt-key está obsoleto no Ubuntu 24.04)
+do_key() {
+    local tmp
+    tmp=$(mktemp -d)
+    if ! retry 5 10 wget -q -T 30 -O "$tmp/key.asc" "$KEY_URL"; then
+        rm -rf "$tmp"; err "Não foi possível baixar a chave: $KEY_URL"; return 1
+    fi
+    if ! gpg --batch --quiet --show-keys "$tmp/key.asc" >/dev/null 2>&1; then
+        rm -rf "$tmp"; err "O arquivo baixado não é uma chave GPG válida."; return 1
+    fi
+    install -d -m 0755 "$(dirname "$KEYRING")"
+    gpg --batch --yes --dearmor -o "$tmp/key.gpg" "$tmp/key.asc" &&
+        install -m 0644 "$tmp/key.gpg" "$KEYRING"
+    local rc=$?
+    rm -rf "$tmp"
+    return $rc
+}
+chk_key() { [[ -s "$KEYRING" ]] && gpg --batch --quiet --show-keys "$KEYRING" >/dev/null 2>&1; }
+
+# sources — além dos componentes da documentação (stable main e stretch
+# backports/main), o Ubuntu 24.04 precisa de:
+#   • buster backports/main → libicu63, exigida pelo axxon-one-core
+#   • stretch backports/mono-6_4 → mono 6.4, versão exata exigida pelo client
+# As prioridades evitam que pacotes Debian do repositório Axxon substituam os
+# do Ubuntu: só pacotes axxon-* (e o mono 6.4, no client) têm preferência.
+expected_sources() {
+    local opt="[signed-by=$KEYRING]"
+    cat <<EOF
+# Gerenciado pelo instalador Axxon One (SEESTEC) — não edite manualmente
+deb $opt $REPO_URL stable main
+deb $opt $REPO_URL stretch backports/main backports/mono-6_4
+deb $opt $REPO_URL buster backports/main
+EOF
+}
+expected_prefs() {
+    cat <<EOF
+# Gerenciado pelo instalador Axxon One (SEESTEC) — não edite manualmente
+Package: *
+Pin: origin "$REPO_HOST"
+Pin-Priority: 100
+
+Package: axxon-* aksusbd
+Pin: origin "$REPO_HOST"
+Pin-Priority: 500
+EOF
+    if [[ "$TYPE" == "client" ]]; then
+        cat <<EOF
+
+Package: /mono/ ca-certificates-mono
+Pin: version $MONO_VERSION
+Pin-Priority: 1001
+EOF
+    fi
+}
+do_sources() {
+    expected_sources > "$SOURCES_FILE.tmp" && mv -f "$SOURCES_FILE.tmp" "$SOURCES_FILE" &&
+        chmod 0644 "$SOURCES_FILE" || return 1
+    expected_prefs > "$PREFS_FILE.tmp" && mv -f "$PREFS_FILE.tmp" "$PREFS_FILE" &&
+        chmod 0644 "$PREFS_FILE"
+}
+chk_sources() {
+    [[ "$(cat "$SOURCES_FILE" 2>/dev/null)" == "$(expected_sources)" ]] &&
+        [[ "$(cat "$PREFS_FILE" 2>/dev/null)" == "$(expected_prefs)" ]]
+}
+
+# update — apt update precisa terminar sem erros nos repositórios
+do_update() {
+    export DEBIAN_FRONTEND=noninteractive
+    local out
+    out=$(mktemp)
+    if ! retry 3 20 run "${APT[@]}" update > "$out"; then
+        cat "$out"; rm -f "$out"; return 1
+    fi
+    cat "$out"
+    if grep -qE '^(W|E): .*(axxonsoft|NO_PUBKEY|Signed-By)' "$out"; then
+        rm -f "$out"; err "O apt reportou problemas no repositório Axxon (veja acima)."; return 1
+    fi
+    rm -f "$out"
+    chk_update || { err "Pacote $(package_name) não encontrado no repositório."; return 1; }
+}
+chk_update() {
+    local cand
+    cand=$(apt-cache policy "$(package_name)" 2>/dev/null | awk '/Candidate:/ {print $2}')
+    [[ -n "$cand" && "$cand" != "(none)" ]]
+}
+
+# download — baixa tudo antes de instalar; se a conexão cair, o apt reaproveita
+# os arquivos já baixados (inclusive parciais) na próxima execução
+do_download() {
+    export DEBIAN_FRONTEND=noninteractive
+    retry 5 20 run "${APT[@]}" install --download-only "$(package_name)"
+}
+# Concluído quando não resta nenhum .deb a baixar (ou o pacote já está instalado)
+chk_download() {
+    local uris
+    uris=$(apt-get -qq --print-uris install "$(package_name)" 2>/dev/null) || return 1
+    [[ -z "$uris" ]]
+}
+
+# install
+preseed_debconf() {
+    [[ "$TYPE" == "server" && -n "$DOMAIN" ]] || return 0
+    printf 'axxon-one axxon-one/domain string %s\n' "$DOMAIN" | debconf-set-selections
+}
+do_install() {
+    local pkg
+    pkg=$(package_name)
+    preseed_debconf || return 1
+    if $ASSUME_YES || ! has_tty; then
+        export DEBIAN_FRONTEND=noninteractive
+        retry 2 10 run "${APT[@]}" install "$pkg" || return 1
     else
-        printf '[User]\nSession=ubuntu-xorg\nXSession=ubuntu\n' | tee "$acct_file" > /dev/null
-    fi
-    grn "  [3/6] /var/lib/AccountsService/users/$real_user → Session=ubuntu-xorg"
-
-    # 4. /etc/profile.d — variáveis de ambiente globais
-    tee /etc/profile.d/99-force-xorg.sh > /dev/null << 'ENVEOF'
-export WAYLAND_DISPLAY=""
-export GDK_BACKEND=x11
-export QT_QPA_PLATFORM=xcb
-export XDG_SESSION_TYPE=x11
-export DISPLAY="${DISPLAY:-:0}"
-ENVEOF
-    chmod 644 /etc/profile.d/99-force-xorg.sh
-    grn "  [4/6] /etc/profile.d/99-force-xorg.sh → GDK_BACKEND=x11 / QT_QPA_PLATFORM=xcb"
-
-    # 5. Systemd override — injeta variáveis no gdm.service
-    mkdir -p /etc/systemd/system/gdm.service.d
-    tee /etc/systemd/system/gdm.service.d/disable-wayland.conf > /dev/null << 'SVCEOF'
-[Service]
-Environment=WAYLAND_DISPLAY=
-Environment=XDG_SESSION_TYPE=x11
-SVCEOF
-    systemctl daemon-reload 2>/dev/null || true
-    grn "  [5/6] systemd override gdm.service → WAYLAND_DISPLAY= / XDG_SESSION_TYPE=x11"
-
-    # 6. ~/.xsessionrc — sessão gráfica explícita no nível do usuário
-    local real_home
-    real_home=$(getent passwd "$real_user" | cut -d: -f6)
-    printf 'DESKTOP_SESSION=ubuntu-xorg\nexport XDG_SESSION_TYPE=x11\nexport GDK_BACKEND=x11\n' \
-        | sudo -u "$real_user" tee "$real_home/.xsessionrc" > /dev/null
-    grn "  [6/6] $real_home/.xsessionrc → DESKTOP_SESSION=ubuntu-xorg"
-
-    echo
-    info "Wayland desabilitado por 6 métodos independentes."
-    info "REINICIE O SISTEMA para iniciar em sessão Xorg."
-    echo
-}
-
-# ── watchdog / guardian do Axxon One Client ──────────────────────────────────
-setup_axxon_watchdog() {
-    local real_user="${SUDO_USER:-$USER}"
-    local real_home
-    real_home=$(getent passwd "$real_user" | cut -d: -f6)
-
-    info "Instalando dependências de controle de janela..."
-    apt-get install -y xdotool x11-utils
-    echo
-
-    info "Criando script Axxon Guardian..."
-    tee /usr/local/bin/axxon-guardian.sh > /dev/null << 'GUARDIAN'
-#!/bin/bash
-# Mantém o Axxon One Client sempre em execução.
-
-AXXON_BIN=""
-for _c in \
-    /usr/bin/AxxonOneClient \
-    /usr/local/bin/AxxonOneClient \
-    /opt/AxxonOneClient/bin/AxxonOneClient; do
-    [[ -x "$_c" ]] && { AXXON_BIN="$_c"; break; }
-done
-[[ -z "$AXXON_BIN" ]] && \
-    AXXON_BIN=$(find /usr /opt -maxdepth 8 -name "AxxonOneClient" -type f 2>/dev/null | head -1)
-
-if [[ -z "$AXXON_BIN" ]]; then
-    notify-send "Axxon Guardian" "Executável AxxonOneClient não encontrado." 2>/dev/null || true
-    exit 1
-fi
-
-ASK_TAG="$HOME/screenREC/ask_tag.py"
-LOG="/tmp/axxon-guardian.log"
-log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG"; }
-
-export DISPLAY="${DISPLAY:-:0}"
-export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-x11}"
-
-log "=== Axxon Guardian iniciado — $AXXON_BIN ==="
-
-while true; do
-    log "Iniciando AxxonOneClient..."
-
-    ASK_TAG_PID=""
-    if [[ -f "$ASK_TAG" ]]; then
-        python3 "$ASK_TAG" &
-        ASK_TAG_PID=$!
-        log "ask_tag iniciado (PID $ASK_TAG_PID)"
-    fi
-
-    "$AXXON_BIN" &
-    AXXON_PID=$!
-    log "AxxonOneClient iniciado (PID $AXXON_PID)"
-
-    # Aguarda a janela aparecer e remove o botão de fechar via Motif hints
-    if command -v xdotool &>/dev/null && command -v xprop &>/dev/null; then
-        WIN=""
-        for _i in {1..20}; do
-            sleep 1
-            WIN=$(xdotool search --pid "$AXXON_PID" 2>/dev/null | tail -1)
-            [[ -n "$WIN" ]] && break
-        done
-        if [[ -n "$WIN" ]]; then
-            # MWM_HINTS_FUNCTIONS=1, funcs=resize+move+minimize+maximize (sem close=32)
-            xprop -id "$WIN" -f _MOTIF_WM_HINTS 32c \
-                -set _MOTIF_WM_HINTS "1, 30, 0, 0, 0" 2>/dev/null || true
-            log "Botão de fechar removido (window=$WIN)"
-        fi
-    fi
-
-    wait "$AXXON_PID" 2>/dev/null
-    log "AxxonOneClient encerrado. Reiniciando em 2s..."
-
-    [[ -n "$ASK_TAG_PID" ]] && kill "$ASK_TAG_PID" 2>/dev/null || true
-    unset ASK_TAG_PID AXXON_PID WIN
-
-    sleep 2
-done
-GUARDIAN
-    chmod +x /usr/local/bin/axxon-guardian.sh
-
-    # Autostart para todos os usuários (login gráfico)
-    tee /etc/xdg/autostart/axxon-guardian.desktop > /dev/null << 'DESKTOP'
-[Desktop Entry]
-Type=Application
-Name=Axxon One Guardian
-Exec=/usr/local/bin/axxon-guardian.sh
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-Terminal=false
-Comment=Keeps Axxon One Client running at all times
-DESKTOP
-
-    # Systemd user service — camada adicional (cria symlink para habilitar sem dbus)
-    local svc_dir="$real_home/.config/systemd/user"
-    local wants_dir="$svc_dir/graphical-session.target.wants"
-    sudo -u "$real_user" mkdir -p "$wants_dir"
-
-    sudo -u "$real_user" tee "$svc_dir/axxon-guardian.service" > /dev/null << 'SERVICE'
-[Unit]
-Description=Axxon One Client Guardian
-After=graphical-session.target
-PartOf=graphical-session.target
-
-[Service]
-ExecStart=/usr/local/bin/axxon-guardian.sh
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=graphical-session.target
-SERVICE
-
-    sudo -u "$real_user" ln -sf \
-        "$svc_dir/axxon-guardian.service" \
-        "$wants_dir/axxon-guardian.service"
-
-    grn "  Script: /usr/local/bin/axxon-guardian.sh"
-    grn "  Autostart: /etc/xdg/autostart/axxon-guardian.desktop"
-    grn "  Serviço: $svc_dir/axxon-guardian.service"
-    echo
-}
-
-# ── passo: instalação dos pacotes ────────────────────────────────────────────
-if ckpt_is_done "install_pkgs"; then
-    ckpt_skip "install_pkgs" "Instalação dos pacotes"
-else
-    if [[ "$type" == "server" ]]; then
-        info "Instalando Axxon One Server via apt..."
         echo
-        apt-get install -y axxon-one
-    elif [[ "$type" == "client" ]]; then
-        install_client_pkgs "$PKG_DIR"
+        info "O instalador do Axxon One fará algumas perguntas de configuração."
+        info "Em caso de dúvida, mantenha o valor padrão (Enter)."
+        [[ "$TYPE" == "server" ]] &&
+            info "O domínio pode ficar em branco e ser definido no Client na primeira conexão."
+        echo
+        unset DEBIAN_FRONTEND
+        run_tty "${APT[@]}" install "$pkg" || return 1
     fi
-    ckpt_done "install_pkgs" "Instalação dos pacotes"
-fi
+    export DEBIAN_FRONTEND=noninteractive
+    chk_install
+}
+chk_install() {
+    pkg_installed "$(package_name)" && [[ -z "$(dpkg --audit 2>/dev/null)" ]]
+}
 
-# ── passo: credencial sudo (server + client) ─────────────────────────────────
-if ckpt_is_done "save_sudo_pass"; then
-    ckpt_skip "save_sudo_pass" "Credencial sudo"
-else
-    save_sudo_password
-    ckpt_done "save_sudo_pass" "Credencial sudo"
-fi
+# service (server)
+do_service() {
+    run systemctl daemon-reload
+    run systemctl enable axxon-one.service || return 1
+    systemctl is-active --quiet axxon-one.service || run systemctl start axxon-one.service || return 1
+    local waited=0
+    info "  Aguardando o serviço axxon-one ficar ativo (até ${SERVICE_TIMEOUT}s)..."
+    until systemctl is-active --quiet axxon-one.service; do
+        if ((waited >= SERVICE_TIMEOUT)) || systemctl is-failed --quiet axxon-one.service; then
+            run systemctl status --no-pager axxon-one.service
+            run journalctl -u axxon-one.service -n 50 --no-pager
+            return 1
+        fi
+        sleep 5; ((waited += 5))
+    done
+}
+chk_service() {
+    systemctl is-enabled --quiet axxon-one.service 2>/dev/null &&
+        systemctl is-active --quiet axxon-one.service
+}
 
-# ── passos exclusivos do client ───────────────────────────────────────────────
-if [[ "$type" == "client" ]]; then
+# ── execução das etapas ───────────────────────────────────────────────────────
+CURRENT_STEP=""
 
-    if ckpt_is_done "download_scripts"; then
-        ckpt_skip "download_scripts" "Scripts screenREC"
+run_steps() {
+    local total=${#STEPS[@]} i=0 entry id label fn chk
+    for entry in "${STEPS[@]}"; do
+        IFS='|' read -r id label fn chk <<<"$entry"
+        ((i++))
+        if [[ "$(st_get "step_$id")" == "done" ]] && "$chk" >/dev/null 2>&1; then
+            printf '%s  [→] %d/%d %s — já concluída%s\n' "$C_YLW" "$i" "$total" "$label" "$C_RST"
+            continue
+        fi
+        echo
+        info "━━ Etapa $i/$total: $label"
+        CURRENT_STEP="$id"
+        st_set "step_$id" "running"
+        if "$fn" && "$chk"; then
+            st_set "step_$id" "done"
+            ok "$label"
+        else
+            st_set "step_$id" "failed"
+            st_set "failed_at" "$id"
+            echo
+            err "Falha na etapa $i/$total: $label"
+            printf '      Detalhes no log: %s\n' "$LOG_FILE" >&2
+            printf '      Corrija o problema e execute o instalador novamente — ele retoma desta etapa.\n\n' >&2
+            exit 1
+        fi
+    done
+    CURRENT_STEP=""
+}
+
+show_progress() {
+    local entry id label fn chk status mark
+    echo
+    printf '%s  Instalação anterior encontrada: Axxon One %s%s\n' "$C_BLD" "${TYPE^^}" "$C_RST"
+    for entry in "${STEPS[@]}"; do
+        IFS='|' read -r id label fn chk <<<"$entry"
+        status=$(st_get "step_$id")
+        case "$status" in
+            done)    mark="${C_GRN}✓${C_RST}" ;;
+            failed)  mark="${C_RED}✗${C_RST}" ;;
+            running) mark="${C_YLW}…${C_RST}" ;;
+            *)       mark="○" ;;
+        esac
+        printf '    %s  %s\n' "$mark" "$label"
+    done
+    echo
+}
+
+on_interrupt() {
+    echo
+    [[ -n "$CURRENT_STEP" ]] && st_set "step_$CURRENT_STEP" "failed"
+    err "Instalação interrompida pelo usuário."
+    printf '      Execute o instalador novamente para retomar de onde parou.\n\n' >&2
+    exit 130
+}
+
+# ── menu ──────────────────────────────────────────────────────────────────────
+choose_type() {
+    has_tty || die "Nenhum tipo informado e sem terminal interativo." "Use --server ou --client."
+    local opt
+    while true; do
+        cat <<EOF
+
+  ╔════════════════════════════════════════╗
+  ║     AXXON ONE — Instalador Linux       ║
+  ╠════════════════════════════════════════╣
+  ║  1) Server                             ║
+  ║  2) Client                             ║
+  ║  3) Sair                               ║
+  ╚════════════════════════════════════════╝
+EOF
+        read -rp "  Escolha o tipo de instalação [1-3]: " opt || exit 1
+        case "$opt" in
+            1) TYPE="server" ;;
+            2) TYPE="client" ;;
+            3) echo; info "Instalação cancelada."; exit 0 ;;
+            *) warn "Opção inválida."; continue ;;
+        esac
+        confirm "Confirma a instalação do Axxon One ${C_BLD}${TYPE^^}${C_RST}?" && return 0
+    done
+}
+
+# Decide entre retomar, recomeçar ou iniciar uma nova instalação
+resolve_state() {
+    local saved_type completed
+    saved_type=$(st_get type)
+    completed=$(st_get completed)
+
+    if $RESET; then
+        st_clear
+        saved_type=""
+    fi
+
+    if [[ -n "$saved_type" && "$completed" != "yes" ]]; then
+        if [[ -n "$TYPE" && "$TYPE" != "$saved_type" ]]; then
+            die "Existe uma instalação do ${saved_type^^} não concluída." \
+                "Retome com --$saved_type ou descarte o checkpoint com --reset."
+        fi
+        TYPE="$saved_type"
+        steps_for_type
+        show_progress
+        if ! confirm "Retomar a instalação de onde parou?" S; then
+            confirm "Descartar o progresso e recomeçar do zero?" N || exit 0
+            st_clear
+        fi
     else
-        download_scripts
-        ckpt_done "download_scripts" "Scripts screenREC"
+        [[ -n "$TYPE" ]] || choose_type
+        if [[ "$completed" == "yes" && "$saved_type" == "$TYPE" ]]; then
+            info "O Axxon One ${TYPE^^} já foi instalado por este instalador — revalidando etapas."
+        else
+            st_clear
+        fi
     fi
 
-    if ckpt_is_done "cleanup_config"; then
-        ckpt_skip "cleanup_config" "Retenção de gravações"
+    st_set type "$TYPE"
+    st_set completed "no"
+    steps_for_type
+}
+
+# ── remoção ───────────────────────────────────────────────────────────────────
+do_remove() {
+    local pkgs
+    pkgs=$(dpkg-query -W -f='${db:Status-Status} ${Package}\n' 'axxon-*' 2>/dev/null |
+        awk '$1 != "not-installed" {print $2}' | xargs || true)
+    echo
+    info "Serão removidos: ${pkgs:-(nenhum pacote axxon instalado)}"
+    info "Também: $SOURCES_FILE, $PREFS_FILE, $KEYRING e o checkpoint."
+    confirm "Confirma a remoção?" N || exit 0
+    export DEBIAN_FRONTEND=noninteractive
+    if [[ -n "$pkgs" ]]; then
+        systemctl stop axxon-one.service >/dev/null 2>&1 || true
+        # shellcheck disable=SC2086
+        run "${APT[@]}" purge $pkgs || die "Falha ao remover os pacotes (veja $LOG_FILE)."
+    fi
+    rm -f "$SOURCES_FILE" "$PREFS_FILE" "$KEYRING"
+    st_clear
+    run "${APT[@]}" update >/dev/null || true
+    ok "Axxon One removido."
+    info "Dependências que ficaram sem uso podem ser removidas com: sudo apt autoremove"
+}
+
+# ── resumo final ──────────────────────────────────────────────────────────────
+summary() {
+    local pkg ver
+    pkg=$(package_name)
+    ver=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
+    echo
+    printf '%s══════════════════════════════════════════════════════%s\n' "$C_GRN" "$C_RST"
+    printf '%s  Axxon One %s %s instalado com sucesso!%s\n' "$C_GRN$C_BLD" "${TYPE^^}" "$ver" "$C_RST"
+    printf '%s══════════════════════════════════════════════════════%s\n' "$C_GRN" "$C_RST"
+    if [[ "$TYPE" == "server" ]]; then
+        local base
+        base=$(grep -m1 -oP '^NGP_PORT_BASE=\K[0-9]+' /opt/AxxonSoft/AxxonOne/instance.conf 2>/dev/null || echo 20111)
+        printf '  Serviço  : axxon-one (%s)\n' "$(systemctl is-active axxon-one.service)"
+        printf '  Endereço : %s\n' "$(hostname -I 2>/dev/null | xargs)"
+        printf '  Portas   : TCP %s a %s\n' "$base" "$((base + 100))"
+        printf '  Comandos : sudo systemctl {status|restart|stop} axxon-one\n'
+        printf '  Reconfig.: sudo dpkg-reconfigure axxon-one\n'
     else
-        real_user="${SUDO_USER:-$USER}"
-        real_home=$(getent passwd "$real_user" | cut -d: -f6)
-        info "Configurando período de retenção das gravações..."
-        sudo -u "$real_user" bash "$real_home/screenREC/cleanup_old.sh" --config
-        ckpt_done "cleanup_config" "Retenção de gravações"
+        printf '  Abra o "Axxon One Client" pelo menu de aplicativos (não execute como root).\n'
+        printf '  Idioma/logs: sudo dpkg-reconfigure axxon-one-client\n'
+        printf '  O Client deve ter a mesma versão do Server ao qual se conecta.\n'
+    fi
+    printf '  Log      : %s\n\n' "$LOG_FILE"
+}
+
+# ── principal ─────────────────────────────────────────────────────────────────
+main() {
+    ORIG_ARGS="$*"
+    parse_args "$@"
+    check_os
+    ensure_root "$@"
+    acquire_lock
+    init_log
+    trap on_interrupt INT TERM
+
+    if $REMOVE; then
+        do_remove
+        exit 0
     fi
 
-    if ckpt_is_done "setup_autostart"; then
-        ckpt_skip "setup_autostart" "Autostart screenREC"
-    else
-        setup_autostart
-        ckpt_done "setup_autostart" "Autostart screenREC"
-    fi
+    check_arch
+    resolve_state
+    [[ "$TYPE" == "server" ]] && check_systemd
+    check_disk
+    check_network
 
-    if ckpt_is_done "setup_samba"; then
-        ckpt_skip "setup_samba" "Servidor Samba"
-    else
-        real_user="${SUDO_USER:-$USER}"
-        real_home=$(getent passwd "$real_user" | cut -d: -f6)
-        bash "$real_home/screenREC/setup_samba.sh"
-        ckpt_done "setup_samba" "Servidor Samba"
-    fi
+    info "Instalando Axxon One ${TYPE^^} — Ubuntu $(. /etc/os-release && echo "$VERSION_ID")"
+    run_steps
 
-    if ckpt_is_done "force_xorg"; then
-        ckpt_skip "force_xorg" "Desabilitar Wayland"
-    else
-        force_xorg
-        ckpt_done "force_xorg" "Desabilitar Wayland"
-    fi
+    st_set completed "yes"
+    st_set completed_at "$(date '+%F %T')"
+    summary
+}
 
-    if ckpt_is_done "setup_watchdog"; then
-        ckpt_skip "setup_watchdog" "Axxon Guardian (watchdog)"
-    else
-        setup_axxon_watchdog
-        ckpt_done "setup_watchdog" "Axxon Guardian (watchdog)"
-    fi
-
-fi
-
-# ── conclusão ─────────────────────────────────────────────────────────────────
-echo
-grn "Axxon One ${version} ${type^^} instalado com sucesso!"
-echo
-
-# Remove checkpoint e diretório temporário após instalação bem-sucedida
-ckpt_clear
-
-info "Log completo salvo em: $LOG_FILE"
-echo
-
-for ((t = 10 ; t > 0 ; t--)); do
-    s=$([[ $t -gt 1 ]] && echo 's' || echo '')
-    echo -ne "\r\033[KO sistema será reiniciado em $t segundo$s para aplicação das configurações\e[0m"
-    sleep 1
-done
-echo
-
-reboot
+main "$@"
