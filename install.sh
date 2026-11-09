@@ -11,6 +11,7 @@
 #   sudo bash install.sh --client        # instala o Axxon One Client
 #   sudo bash install.sh --server -y     # sem perguntas (valores padrão)
 #   sudo bash install.sh --client --version 3.1.0.8   # versão específica
+#   sudo bash install.sh --client --language en       # idioma do Client
 #   sudo bash install.sh --help          # todas as opções
 #
 # A instalação é dividida em etapas com checkpoint. Se algo falhar (queda de
@@ -25,7 +26,7 @@ fi
 set -uo pipefail
 
 # ── constantes ────────────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="2.1.0"
+readonly SCRIPT_VERSION="2.2.0"
 readonly MIN_UBUNTU="24.04"
 
 readonly REPO_URL="https://download.axxonsoft.com/debian-repository"
@@ -35,6 +36,13 @@ readonly KEYRING="/etc/apt/keyrings/axxonsoft.gpg"
 readonly SOURCES_FILE="/etc/apt/sources.list.d/axxonsoft.list"
 readonly PREFS_FILE="/etc/apt/preferences.d/axxonsoft"
 readonly MONO_PREFS_FILE="/etc/apt/preferences.d/axxonsoft-mono"
+readonly UI_CONF="/etc/AxxonSoft/axxon-one-client.conf"
+readonly UI_TEMPLATES="/var/lib/dpkg/info/axxon-one-client.templates"
+readonly UI_OS_LANGUAGE="[OS Language]"
+# Idioma do Client quando o locale do sistema é C/POSIX (padrão do WSL), que o
+# mono não reconhece como cultura: o Client grava CultureName="C" na primeira
+# execução e falha ao conectar no Server (NullReferenceException no gRPC)
+readonly UI_FALLBACK_CULTURE="pt-BR"
 readonly LEGACY_KEY="/etc/apt/trusted.gpg.d/axxonsoft.gpg"
 # Pacotes principais: Server e Client compartilham o axxon-one-core, logo
 # precisam estar sempre na mesma versão
@@ -61,6 +69,7 @@ TYPE=""          # server | client
 ASSUME_YES=false # -y: sem perguntas, debconf com valores padrão
 DOMAIN=""        # domínio do Axxon One Server (opcional)
 VERSION=""       # versão do Axxon One (vazio: a instalada ou a mais recente)
+LANGUAGE_OPT=""  # idioma do Client (vazio: automático)
 RESET=false
 REMOVE=false
 
@@ -100,6 +109,8 @@ Uso: sudo bash $(basename "$0") [opções]
   --version VER     Versão do Axxon One (padrão: a já instalada nesta máquina;
                     se não houver nenhuma, a mais recente). Uma versão diferente
                     da instalada atualiza Server e Client juntos.
+  --language CULT   Idioma do Client: pt-BR, en, es... ou "[OS Language]".
+                    Padrão: idioma do sistema; pt-BR se o locale for C/POSIX.
   --reset           Descarta o checkpoint e refaz todas as etapas
   --remove          Remove o Axxon One, o repositório e o checkpoint
   -h, --help        Mostra esta ajuda
@@ -121,6 +132,9 @@ parse_args() {
             --version)  [[ $# -ge 2 ]] || die "--version exige um valor."
                         VERSION="$2"; shift ;;
             --version=*) VERSION="${1#*=}" ;;
+            --language) [[ $# -ge 2 ]] || die "--language exige um valor."
+                        LANGUAGE_OPT="$2"; shift ;;
+            --language=*) LANGUAGE_OPT="${1#*=}" ;;
             --reset)    RESET=true ;;
             --remove)   REMOVE=true ;;
             -h|--help)  usage; exit 0 ;;
@@ -296,6 +310,7 @@ STEPS_COMMON=(
     "version|Versão do Axxon One e dependências|do_version|chk_version"
     "download|Download dos pacotes|do_download|chk_download"
     "install|Instalação do Axxon One|do_install|chk_install"
+    "culture|Idioma do Axxon One Client|do_culture|chk_culture"
 )
 STEPS_SERVER=("service|Serviço axxon-one ativo|do_service|chk_service")
 
@@ -623,6 +638,10 @@ chk_download() {
 
 # install
 preseed_debconf() {
+    if [[ " $(st_get specs_pkgs) " == *" axxon-one-client "* ]]; then
+        printf 'axxon-one-client axxon-one-client/ui_first_start_default_culture_name select %s\n' \
+            "$(ui_culture)" | debconf-set-selections || return 1
+    fi
     [[ "$TYPE" == "server" && -n "$DOMAIN" ]] || return 0
     printf 'axxon-one axxon-one/domain string %s\n' "$DOMAIN" | debconf-set-selections
 }
@@ -655,6 +674,88 @@ chk_install() {
         [[ "$(installed_version "$p")" == "$v" ]] || return 1
     done
     [[ -z "$(dpkg --audit 2>/dev/null)" ]]
+}
+
+# culture — idioma do Client (ver UI_FALLBACK_CULTURE)
+os_locale_is_c() {
+    local l
+    l=$( (. /etc/default/locale 2>/dev/null; printf '%s' "${LC_ALL:-${LANG:-}}") )
+    [[ -z "$l" || "$l" == C || "$l" == C.* || "$l" == POSIX ]]
+}
+ui_conf_culture() {
+    [[ -r "$UI_CONF" ]] || return 0
+    (. "$UI_CONF" 2>/dev/null; printf '%s' "${UI_FIRST_START_DEFAULT_LOCALE:-}")
+}
+# --language > valor já configurado (diferente de "[OS Language]") > automático
+ui_culture() {
+    local cur
+    if [[ -n "$LANGUAGE_OPT" ]]; then
+        printf '%s\n' "$LANGUAGE_OPT"; return
+    fi
+    cur=$(ui_conf_culture)
+    if [[ -n "$cur" && "$cur" != "$UI_OS_LANGUAGE" ]]; then
+        printf '%s\n' "$cur"
+    elif os_locale_is_c; then
+        printf '%s\n' "$UI_FALLBACK_CULTURE"
+    else
+        printf '%s\n' "$UI_OS_LANGUAGE"
+    fi
+}
+# Cultura usada para corrigir perfis de usuário que gravaram "C"/"POSIX"
+ui_fix_culture() {
+    local c
+    c=$(ui_culture)
+    [[ "$c" == "$UI_OS_LANGUAGE" ]] && c="$UI_FALLBACK_CULTURE"
+    printf '%s\n' "$c"
+}
+# Perfis do Client com cultura inválida (gravada na primeira execução)
+bad_user_configs() {
+    local home
+    while IFS=: read -r _ _ uid _ _ home _; do
+        ((uid >= 1000 && uid < 65534)) || continue
+        [[ -f "$home/.local/share/AxxonSoft/AxxonOne/user.config" ]] || continue
+        grep -lE 'CultureName="(C|POSIX|C\.[^"]*)"' \
+            "$home/.local/share/AxxonSoft/AxxonOne/user.config" 2>/dev/null
+    done < <(getent passwd)
+    return 0
+}
+do_culture() {
+    pkg_installed axxon-one-client || return 0
+    local c fix f stamp owner
+    c=$(ui_culture)
+    if [[ -r "$UI_TEMPLATES" ]] &&
+       ! grep -m1 '^Choices:' "$UI_TEMPLATES" | tr ',' '\n' | sed -E 's/^(Choices:)? *//' | grep -qixF -- "$c"; then
+        err "Idioma inválido: $c"
+        printf '      Opções: %s\n' "$(grep -m1 '^Choices:' "$UI_TEMPLATES" | cut -d: -f2-)" >&2
+        printf '      Execute de novo com --language e uma das opções (ou sem --language para o automático).\n' >&2
+        # não guarda o valor inválido para as próximas execuções
+        st_set requested_language ""
+        return 1
+    fi
+    if [[ "$(ui_conf_culture)" != "$c" ]]; then
+        printf 'axxon-one-client axxon-one-client/ui_first_start_default_culture_name select %s\n' "$c" |
+            debconf-set-selections || return 1
+        info "  Idioma padrão do Client: $c (dpkg-reconfigure axxon-one-client)"
+        DEBIAN_FRONTEND=noninteractive run dpkg-reconfigure -f noninteractive axxon-one-client || return 1
+    fi
+    fix=$(ui_fix_culture)
+    stamp=$(date +%Y%m%d-%H%M%S)
+    while read -r f; do
+        [[ -n "$f" ]] || continue
+        owner=$(stat -c %U "$f")
+        if pgrep -u "$owner" -f AxxonOne.exe >/dev/null 2>&1; then
+            warn "  O Client está aberto para $owner: feche-o e execute o instalador de novo para corrigir $f"
+            return 1
+        fi
+        cp -a "$f" "$f.bak.$stamp"
+        sed -i -E 's/CultureName="(C|POSIX|C\.[^"]*)"/CultureName="'"$fix"'"/' "$f"
+        info "  Perfil de $owner corrigido: idioma $fix (backup em $f.bak.$stamp)"
+    done < <(bad_user_configs)
+    return 0
+}
+chk_culture() {
+    pkg_installed axxon-one-client || return 0
+    [[ "$(ui_conf_culture)" == "$(ui_culture)" && -z "$(bad_user_configs)" ]]
 }
 
 # service (server)
@@ -802,6 +903,11 @@ resolve_state() {
     else
         VERSION=$(st_get requested_version)
     fi
+    if [[ -n "$LANGUAGE_OPT" ]]; then
+        st_set requested_language "$LANGUAGE_OPT"
+    else
+        LANGUAGE_OPT=$(st_get requested_language)
+    fi
     steps_for_type
 }
 
@@ -846,7 +952,8 @@ summary() {
         printf '  Reconfig.: sudo dpkg-reconfigure axxon-one\n'
     else
         printf '  Abra o "Axxon One Client" pelo menu de aplicativos (não execute como root).\n'
-        printf '  Idioma/logs: sudo dpkg-reconfigure axxon-one-client\n'
+        printf '  Idioma   : %s (alterar: sudo bash install.sh --client --language CULTURA)\n' "$(ui_conf_culture)"
+        printf '  Logs     : sudo dpkg-reconfigure axxon-one-client\n'
         printf '  O Client deve ter a mesma versão do Server ao qual se conecta.\n'
     fi
     printf '  Log      : %s\n\n' "$LOG_FILE"

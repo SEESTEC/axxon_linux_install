@@ -27,6 +27,7 @@ sudo bash install.sh --client              # Axxon One Client (pacote axxon-one-
 sudo bash install.sh --server -y           # sem perguntas, valores padrão do debconf
 sudo bash install.sh --server --domain MEU_DOMINIO
 sudo bash install.sh --client --version 3.1.0.8   # versão específica
+sudo bash install.sh --client --language en       # idioma do Client
 sudo bash install.sh --reset               # descarta o checkpoint e refaz tudo
 sudo bash install.sh --remove              # remove Axxon One, repositório e checkpoint
 ```
@@ -40,6 +41,16 @@ Server e Client usam o mesmo `axxon-one-core` com versão exata, então os dois 
 - **`--version VER`**: usa essa versão. Se ela for diferente da instalada, o instalador pede confirmação e atualiza Server e Client juntos.
 
 Antes de baixar qualquer coisa, a instalação é simulada. Se algum pacote `axxon-*` já instalado fosse removido ou mudasse para outra versão, o instalador cancela.
+
+## Idioma do Client
+
+Na primeira execução, cada usuário do Client grava um idioma a partir do locale do sistema. No WSL o locale padrão é `C.UTF-8`: o Client grava `CultureName="C"`, que o mono não reconhece, e depois **não consegue conectar ao Server** (`NullReferenceException` ao criar o canal gRPC).
+
+O instalador evita isso:
+
+- Com o locale do sistema em `C`/`POSIX`, define `pt-BR` como idioma padrão do Client (`UI_FIRST_START_DEFAULT_LOCALE` em `/etc/AxxonSoft/axxon-one-client.conf`, pelo debconf do pacote). Em outros locales mantém `[OS Language]`.
+- `--language CULTURA` escolhe outro idioma (`en`, `es`, `pt-PT`...).
+- Perfis de usuário que já gravaram `C`/`POSIX` (`~/.local/share/AxxonSoft/AxxonOne/user.config`) são corrigidos, com backup. O Client desse usuário precisa estar fechado.
 
 No modo interativo, o próprio pacote Axxon pergunta domínio, portas e logs. O domínio pode ficar em branco e ser definido no Client na primeira conexão.
 
@@ -56,7 +67,8 @@ No modo interativo, o próprio pacote Axxon pergunta domínio, portas e logs. O 
 | 7 | Versão | escolhe a versão, monta a lista `pacote=versão`, fixa o mono exigido pelo Client em `/etc/apt/preferences.d/axxonsoft-mono` e simula a instalação |
 | 8 | Download | baixa todos os `.deb` antes de instalar |
 | 9 | Instalação | `apt-get install` da lista com versões exatas |
-| 10 | Serviço (Server) | habilita e aguarda o `axxon-one.service` ficar ativo |
+| 10 | Idioma do Client | idioma padrão válido e correção de perfis com cultura `C` (só se o Client estiver instalado) |
+| 11 | Serviço (Server) | habilita e aguarda o `axxon-one.service` ficar ativo |
 
 ## Retomada
 
@@ -80,6 +92,7 @@ O instalador usa o repositório da [documentação oficial](https://docs.axxonso
 | "Sistema operacional incompatível" | Use Ubuntu 24.04 LTS ou superior |
 | "Outra execução do instalador já está em andamento" | Aguarde a outra execução terminar |
 | "não está disponível no repositório" | A versão instalada saiu do repositório: atualize tudo com `--version` (veja as versões listadas) |
+| Client não conecta ("Connection failed", `Culture name C is not supported` no log) | `sudo bash install.sh --client` com o Client fechado; no Client use o endereço `127.0.0.1` ou o nome do servidor, sem a porta 8000 (que é a do Web Client) |
 | Falha na etapa de download/apt update | Verifique internet/proxy/DNS e execute de novo |
 | Serviço não sobe | `sudo journalctl -u axxon-one -n 100` |
 | Reconfigurar o Server | `sudo dpkg-reconfigure axxon-one` |
