@@ -12,6 +12,7 @@
 #   sudo bash install.sh --server -y     # sem perguntas (valores padrão)
 #   sudo bash install.sh --client --version 3.1.0.8   # versão específica
 #   sudo bash install.sh --client --language en       # idioma do Client
+#   sudo bash install.sh --server --webpanel-url https://painel.local  # + painel web
 #   sudo bash install.sh --help          # todas as opções
 #
 # A instalação é dividida em etapas com checkpoint. Se algo falhar (queda de
@@ -26,7 +27,7 @@ fi
 set -uo pipefail
 
 # ── constantes ────────────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="2.2.0"
+readonly SCRIPT_VERSION="2.3.0"
 readonly MIN_UBUNTU="24.04"
 
 readonly REPO_URL="https://download.axxonsoft.com/debian-repository"
@@ -54,6 +55,11 @@ readonly BACKUP_DIR="$STATE_DIR/backup"
 readonly LOG_FILE="/var/log/axxon-install.log"
 readonly LOCK_FILE="/run/lock/axxon-install.lock"
 
+# Painel web (página exibida como câmera): script webpanel.sh do mesmo repositório
+readonly WEBPANEL_CMD="/usr/local/bin/axxon-webpanel"
+readonly WEBPANEL_CONF="/etc/axxon-webpanel/webpanel.conf"
+readonly WEBPANEL_RAW_URL="https://raw.githubusercontent.com/SEESTEC/axxon_linux_install/main/webpanel.sh"
+
 readonly MIN_FREE_GB=5
 readonly SERVICE_TIMEOUT=180
 
@@ -70,6 +76,8 @@ ASSUME_YES=false # -y: sem perguntas, debconf com valores padrão
 DOMAIN=""        # domínio do Axxon One Server (opcional)
 VERSION=""       # versão do Axxon One (vazio: a instalada ou a mais recente)
 LANGUAGE_OPT=""  # idioma do Client (vazio: automático)
+WEBPANEL=""      # yes | no | vazio (pergunta no modo interativo do Server)
+WEBPANEL_URL=""  # página do painel web
 RESET=false
 REMOVE=false
 
@@ -111,8 +119,11 @@ Uso: sudo bash $(basename "$0") [opções]
                     da instalada atualiza Server e Client juntos.
   --language CULT   Idioma do Client: pt-BR, en, es... ou "[OS Language]".
                     Padrão: idioma do sistema; pt-BR se o locale for C/POSIX.
+  --webpanel        Server: configura um painel web (página exibida como câmera)
+  --webpanel-url U  Server: idem, já com a página U (testada antes de seguir)
+  --no-webpanel     Server: não pergunta pelo painel web
   --reset           Descarta o checkpoint e refaz todas as etapas
-  --remove          Remove o Axxon One, o repositório e o checkpoint
+  --remove          Remove o Axxon One, o painel web, o repositório e o checkpoint
   -h, --help        Mostra esta ajuda
 
 Sem --server/--client, um menu pergunta o que instalar.
@@ -135,6 +146,11 @@ parse_args() {
             --language) [[ $# -ge 2 ]] || die "--language exige um valor."
                         LANGUAGE_OPT="$2"; shift ;;
             --language=*) LANGUAGE_OPT="${1#*=}" ;;
+            --webpanel) WEBPANEL="yes" ;;
+            --webpanel-url) [[ $# -ge 2 ]] || die "--webpanel-url exige um valor."
+                        WEBPANEL="yes"; WEBPANEL_URL="$2"; shift ;;
+            --webpanel-url=*) WEBPANEL="yes"; WEBPANEL_URL="${1#*=}" ;;
+            --no-webpanel) WEBPANEL="no" ;;
             --reset)    RESET=true ;;
             --remove)   REMOVE=true ;;
             -h|--help)  usage; exit 0 ;;
@@ -313,10 +329,12 @@ STEPS_COMMON=(
     "culture|Idioma do Axxon One Client|do_culture|chk_culture"
 )
 STEPS_SERVER=("service|Serviço axxon-one ativo|do_service|chk_service")
+STEPS_WEBPANEL=("webpanel|Painel web (página exibida como câmera)|do_webpanel|chk_webpanel")
 
 steps_for_type() {
     STEPS=("${STEPS_COMMON[@]}")
     [[ "$TYPE" == "server" ]] && STEPS+=("${STEPS_SERVER[@]}")
+    [[ "$TYPE" == "server" && "$WEBPANEL" == "yes" ]] && STEPS+=("${STEPS_WEBPANEL[@]}")
     return 0
 }
 
@@ -684,6 +702,7 @@ os_locale_is_c() {
 }
 ui_conf_culture() {
     [[ -r "$UI_CONF" ]] || return 0
+    # shellcheck source=/dev/null
     (. "$UI_CONF" 2>/dev/null; printf '%s' "${UI_FIRST_START_DEFAULT_LOCALE:-}")
 }
 # --language > valor já configurado (diferente de "[OS Language]") > automático
@@ -777,6 +796,98 @@ do_service() {
 chk_service() {
     systemctl is-enabled --quiet axxon-one.service 2>/dev/null &&
         systemctl is-active --quiet axxon-one.service
+}
+
+# webpanel (server) — o Client Linux não tem o "Web Board": uma página web é
+# renderizada pelo Chrome, vira vídeo RTSP local e é cadastrada como câmera.
+# Toda a lógica fica no webpanel.sh (que também cria os aliases axxon-web e
+# axxon-dashboard para trocar a página depois).
+WEBPANEL_SCRIPT=""
+webpanel_script() {
+    [[ -n "$WEBPANEL_SCRIPT" && -f "$WEBPANEL_SCRIPT" ]] && { printf '%s' "$WEBPANEL_SCRIPT"; return 0; }
+    local dir f
+    dir=$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo .)")
+    for f in "$dir/webpanel.sh" "$WEBPANEL_CMD"; do
+        if [[ -f "$f" ]] && grep -q "Axxon One — Painel web" "$f"; then
+            WEBPANEL_SCRIPT="$f"; printf '%s' "$f"; return 0
+        fi
+    done
+    # instalador baixado sozinho (wget ... install.sh): busca o webpanel.sh do repositório
+    mkdir -p "$STATE_DIR"
+    f="$STATE_DIR/webpanel.sh"
+    if wget -q -T 30 -O "$f.tmp" "$WEBPANEL_RAW_URL" && grep -q "Axxon One — Painel web" "$f.tmp" &&
+       bash -n "$f.tmp"; then
+        mv -f "$f.tmp" "$f"; chmod 0755 "$f"
+        WEBPANEL_SCRIPT="$f"; printf '%s' "$f"; return 0
+    fi
+    rm -f "$f.tmp"
+    err "Não foi possível obter o webpanel.sh ($WEBPANEL_RAW_URL)."
+    return 1
+}
+
+# Decide se o painel web entra na instalação; pergunta e testa a URL já no início
+resolve_webpanel() {
+    [[ "$TYPE" == "server" ]] || { WEBPANEL=""; return 0; }
+    [[ -z "$WEBPANEL" ]] && WEBPANEL=$(st_get webpanel)
+    [[ -z "$WEBPANEL_URL" ]] && WEBPANEL_URL=$(st_get webpanel_url)
+    if [[ -z "$WEBPANEL" ]]; then
+        if [[ -f "$WEBPANEL_CONF" ]]; then
+            WEBPANEL="yes"          # já instalado: só revalida
+        elif $ASSUME_YES || ! has_tty; then
+            WEBPANEL="no"
+        else
+            echo
+            info "O Client Linux não tem o \"Web Board\". Dá para mostrar uma página web no"
+            info "layout como se fosse uma câmera (só visualização, sem cliques)."
+            if confirm "Configurar um painel web agora?" N; then WEBPANEL="yes"; else WEBPANEL="no"; fi
+        fi
+    fi
+    st_set webpanel "$WEBPANEL"
+    [[ "$WEBPANEL" == "yes" ]] || return 0
+
+    local wp u rc
+    wp=$(webpanel_script) || die "Sem o webpanel.sh não é possível configurar o painel web." \
+        "Execute de novo com --no-webpanel ou baixe o repositório completo."
+    if [[ -n "$WEBPANEL_URL" ]]; then
+        u=$(bash "$wp" check-url "$WEBPANEL_URL" | tail -n1); rc=${PIPESTATUS[0]}
+        if ((rc == 1)); then
+            die "URL do painel web inválida: $WEBPANEL_URL"
+        elif ((rc == 2)) && ! $ASSUME_YES && ! confirm "Usar esta URL do painel web mesmo assim?" N; then
+            die "Cancelado."
+        fi
+        WEBPANEL_URL="$u"
+    elif [[ -f "$WEBPANEL_CONF" ]]; then
+        :   # mantém a URL já configurada
+    elif ! $ASSUME_YES && has_tty; then
+        echo
+        u=$(bash "$wp" ask-url); rc=$?
+        if ((rc == 3)); then
+            warn "Painel web não será configurado."
+            WEBPANEL="no"; st_set webpanel no; return 0
+        fi
+        ((rc == 0)) || die "Não foi possível definir a URL do painel web."
+        WEBPANEL_URL="$u"
+    else
+        die "Informe a página do painel web com --webpanel-url (modo -y)."
+    fi
+    st_set webpanel_url "$WEBPANEL_URL"
+}
+
+do_webpanel() {
+    local wp
+    local -a args=(install)
+    wp=$(webpanel_script) || return 1
+    [[ -n "$WEBPANEL_URL" ]] && args+=(--url "$WEBPANEL_URL")
+    $ASSUME_YES && args+=(-y)
+    _log "\$ bash $wp ${args[*]}"
+    if has_tty && ! $ASSUME_YES; then
+        bash "$wp" "${args[@]}" </dev/tty
+    else
+        bash "$wp" "${args[@]}"
+    fi
+}
+chk_webpanel() {
+    [[ -x "$WEBPANEL_CMD" ]] && "$WEBPANEL_CMD" status -q >/dev/null 2>&1
 }
 
 # ── execução das etapas ───────────────────────────────────────────────────────
@@ -908,6 +1019,7 @@ resolve_state() {
     else
         LANGUAGE_OPT=$(st_get requested_language)
     fi
+    resolve_webpanel
     steps_for_type
 }
 
@@ -919,8 +1031,13 @@ do_remove() {
     echo
     info "Serão removidos: ${pkgs:-(nenhum pacote axxon instalado)}"
     info "Também: $SOURCES_FILE, $PREFS_FILE, $MONO_PREFS_FILE, $KEYRING e o checkpoint."
+    [[ -x "$WEBPANEL_CMD" ]] && info "Também o painel web (serviços, configuração e aliases)."
     confirm "Confirma a remoção?" N || exit 0
     export DEBIAN_FRONTEND=noninteractive
+    if [[ -x "$WEBPANEL_CMD" ]]; then
+        # a câmera some junto com o Server; remove só o painel
+        run "$WEBPANEL_CMD" remove --keep-camera -y || warn "Falha ao remover o painel web (veja $WEBPANEL_CMD remove)."
+    fi
     if [[ -n "$pkgs" ]]; then
         systemctl stop axxon-one.service >/dev/null 2>&1 || true
         # shellcheck disable=SC2086
@@ -950,6 +1067,11 @@ summary() {
         printf '  Portas   : TCP %s a %s\n' "$base" "$((base + 100))"
         printf '  Comandos : sudo systemctl {status|restart|stop} axxon-one\n'
         printf '  Reconfig.: sudo dpkg-reconfigure axxon-one\n'
+        if [[ "$WEBPANEL" == "yes" && -f "$WEBPANEL_CONF" ]]; then
+            # shellcheck source=/dev/null
+            printf '  Painel web: %s\n' "$( (. "$WEBPANEL_CONF" 2>/dev/null; printf '%s' "${URL:-}") )"
+            printf '             trocar a página: axxon-web (ou axxon-dashboard) — abra um terminal novo\n'
+        fi
     else
         printf '  Abra o "Axxon One Client" pelo menu de aplicativos (não execute como root).\n'
         printf '  Idioma   : %s (alterar: sudo bash install.sh --client --language CULTURA)\n' "$(ui_conf_culture)"

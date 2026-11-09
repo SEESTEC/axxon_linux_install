@@ -28,8 +28,10 @@ sudo bash install.sh --server -y           # sem perguntas, valores padrão do d
 sudo bash install.sh --server --domain MEU_DOMINIO
 sudo bash install.sh --client --version 3.1.0.8   # versão específica
 sudo bash install.sh --client --language en       # idioma do Client
+sudo bash install.sh --server --webpanel-url https://painel.local   # Server + painel web
+sudo bash install.sh --server --no-webpanel        # não pergunta pelo painel web
 sudo bash install.sh --reset               # descarta o checkpoint e refaz tudo
-sudo bash install.sh --remove              # remove Axxon One, repositório e checkpoint
+sudo bash install.sh --remove              # remove Axxon One, painel web, repositório e checkpoint
 ```
 
 ## Versão instalada
@@ -69,6 +71,51 @@ No modo interativo, o próprio pacote Axxon pergunta domínio, portas e logs. O 
 | 9 | Instalação | `apt-get install` da lista com versões exatas |
 | 10 | Idioma do Client | idioma padrão válido e correção de perfis com cultura `C` (só se o Client estiver instalado) |
 | 11 | Serviço (Server) | habilita e aguarda o `axxon-one.service` ficar ativo |
+| 12 | Painel web (Server, opcional) | executa o `webpanel.sh` (veja abaixo) |
+
+## Painel web (página exibida como câmera)
+
+O Client Linux do Axxon One **não tem o Web Board** ([limitação documentada pela AxxonSoft](https://docs.axxonsoft.com/confluence/spaces/ONE2025/pages/314539502/Features+and+potential+problems+with+Linux+OS)). O `webpanel.sh` contorna isso: um Google Chrome sem tela (Xvfb) abre a página, o ffmpeg transforma a tela em vídeo H.264 e o MediaMTX publica em RTSP **só em localhost**. A página é cadastrada no Axxon One Server como uma câmera (driver `FFMPEG / 1 channel device`, sem gravação) e vai para o layout como qualquer câmera.
+
+É só visualização: não dá para clicar nem rolar a página. Ela conta como um canal na licença do Axxon One.
+
+**Pelo instalador (Server):** no modo interativo ele pergunta se você quer o painel e pede a URL logo no início, testando a página antes de seguir (URL inválida é recusada e perguntada de novo). Com `-y`, use `--webpanel-url URL`.
+
+**Sozinho** (Server já instalado):
+
+```bash
+sudo bash webpanel.sh                       # pergunta a URL e testa
+sudo bash webpanel.sh install --url URL -y  # sem perguntas
+```
+
+O script:
+
+1. confere o Ubuntu (24.04+, amd64), o Axxon One Server instalado e ativo, e **detecta a versão**;
+2. confere o **driver pack**: o pacote `axxon-drivers-pack`, o driver FFMPEG e o modelo usado, e avisa se houver versão mais nova;
+3. pede e **testa a URL** (http/https: a página precisa responder; 401/403/404 pedem confirmação; `file://`: o arquivo precisa existir e ser legível);
+4. autentica na API do Axxon One (tenta `root`/`root`; se não funcionar, pergunta usuário e senha, sem gravá-los; para automação: `AXXON_USER`/`AXXON_PASSWORD`);
+5. instala Xvfb, ffmpeg, fontes, Google Chrome (pacote oficial) e MediaMTX (versão fixa, **SHA-256 conferido**);
+6. cria o usuário de serviço `axxon_web`, os serviços `axxon-webpanel` e `axxon-webpanel-rtsp` (reinício automático, recarga da página a cada 6 h) e uma política do Chrome que desliga o tradutor e outros avisos;
+7. verifica o vídeo, cadastra a câmera (sem duplicar, se já existir) e confirma que o Axxon recebe a imagem;
+8. instala o comando `axxon-webpanel` e os aliases **`axxon-web`** e **`axxon-dashboard`** para todos os usuários (`/etc/bash.bashrc`);
+9. libera a troca de página **sem senha** para o grupo `axxonweb` (`/etc/sudoers.d/axxon-webpanel`, só `url`, `status` e `restart`). Entra no grupo quem rodou o `sudo`; outros usuários: `--allow-user USUARIO`. Vale a partir de um terminal novo.
+
+O painel roda como o usuário de sistema `axxon_web` (sem login, sem senha e sem shell): o navegador não roda como root e o painel funciona sem ninguém logado. Nenhum outro usuário é criado.
+
+**Trocar a página** (testa a nova URL antes de aplicar):
+
+```bash
+axxon-web                    # ou axxon-dashboard — pergunta a nova URL (Enter mantém, q cancela)
+axxon-webpanel url URL       # direto
+axxon-webpanel status        # serviços, stream e câmera
+axxon-webpanel restart       # recarrega a página
+axxon-webpanel logs
+sudo axxon-webpanel remove   # remove o painel (e, se confirmado, a câmera)
+```
+
+Resolução, fps, taxa de bits e intervalo de recarga ficam em `/etc/axxon-webpanel/webpanel.conf` (depois: `axxon-webpanel restart`). Log: `/var/log/axxon-webpanel.log`. Portas: RTSP `127.0.0.1:8654` (a `8554` é do próprio Axxon).
+
+Se a página exige login, o painel mostra a tela de login: prefira uma URL com token ou um usuário só de visualização.
 
 ## Retomada
 
@@ -93,6 +140,8 @@ O instalador usa o repositório da [documentação oficial](https://docs.axxonso
 | "Outra execução do instalador já está em andamento" | Aguarde a outra execução terminar |
 | "não está disponível no repositório" | A versão instalada saiu do repositório: atualize tudo com `--version` (veja as versões listadas) |
 | Client não conecta ("Connection failed", `Culture name C is not supported` no log) | `sudo bash install.sh --client` com o Client fechado; no Client use o endereço `127.0.0.1` ou o nome do servidor, sem a porta 8000 (que é a do Web Client) |
+| Painel web sem imagem | `axxon-webpanel status` e `axxon-webpanel logs`; no Client, a câmera "Painel Web" deve estar sem gravação |
+| "localhost" na URL do painel não abre | No WSL, `localhost` é o Linux, não o Windows: use o IP do Windows ou da máquina |
 | Falha na etapa de download/apt update | Verifique internet/proxy/DNS e execute de novo |
 | Serviço não sobe | `sudo journalctl -u axxon-one -n 100` |
 | Reconfigurar o Server | `sudo dpkg-reconfigure axxon-one` |
