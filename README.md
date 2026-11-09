@@ -1,6 +1,12 @@
 # Axxon One — Instalador Linux
 
-Instalador do **Axxon One VMS** (Server ou Client) para **Ubuntu 24.04 LTS ou superior**, com retomada automática em caso de falha.
+Instalador do **Axxon One VMS** (Server ou Client) para **Ubuntu 24.04 LTS ou superior**, com retomada automática em caso de falha, painel web opcional (uma página exibida como câmera) e o comando `axxon`, que lista todos os comandos de terminal.
+
+| Arquivo | Para quê |
+|---------|----------|
+| `install.sh` | instala o Server ou o Client (e, no Server, opcionalmente o painel web) |
+| `webpanel.sh` | instala e gerencia o painel web à parte, num Server já instalado |
+| `axxon.sh` | comando `axxon` (lista de comandos), instalado pelos dois scripts acima |
 
 Desenvolvido por SEESTEC — Engenharia e Tecnologia.
 
@@ -11,6 +17,7 @@ Desenvolvido por SEESTEC — Engenharia e Tecnologia.
 - Internet com acesso a `download.axxonsoft.com` (HTTPS)
 - 5 GB livres em disco
 - Server: `systemd` ativo (no WSL, `[boot] systemd=true` em `/etc/wsl.conf`)
+- Painel web: Server instalado na mesma máquina, arquitetura **amd64** (Google Chrome) e acesso HTTPS a `dl.google.com` e `github.com`
 
 ## Uso
 
@@ -19,7 +26,9 @@ wget https://raw.githubusercontent.com/SEESTEC/axxon_linux_install/main/install.
 sudo bash install.sh
 ```
 
-Um menu pergunta se você quer instalar o **Server** ou o **Client**. Também dá para escolher pela linha de comando:
+Um menu pergunta se você quer instalar o **Server** ou o **Client**. No Server, o instalador também pergunta se você quer um painel web e, nesse caso, pede e testa a URL logo no início. No modo interativo, o próprio pacote Axxon pergunta domínio, portas e logs; o domínio pode ficar em branco e ser definido no Client na primeira conexão.
+
+Também dá para escolher pela linha de comando:
 
 ```bash
 sudo bash install.sh --server              # Axxon One Server (pacote axxon-one)
@@ -28,10 +37,22 @@ sudo bash install.sh --server -y           # sem perguntas, valores padrão do d
 sudo bash install.sh --server --domain MEU_DOMINIO
 sudo bash install.sh --client --version 3.1.0.8   # versão específica
 sudo bash install.sh --client --language en       # idioma do Client
-sudo bash install.sh --server --webpanel-url https://painel.local   # Server + painel web
+sudo bash install.sh --server --webpanel              # Server + painel web (pergunta a URL)
+sudo bash install.sh --server --webpanel-url https://painel.local   # Server + painel web, URL já informada
 sudo bash install.sh --server --no-webpanel        # não pergunta pelo painel web
 sudo bash install.sh --reset               # descarta o checkpoint e refaz tudo
-sudo bash install.sh --remove              # remove Axxon One, painel web, repositório e checkpoint
+sudo bash install.sh --remove              # remove Axxon One, painel web, comando axxon, repositório e checkpoint
+sudo bash install.sh --help                # todas as opções
+```
+
+Depois de instalar, `axxon --help` lista todos os comandos de terminal da máquina.
+
+## Comando `axxon`
+
+Os dois instaladores (`install.sh` e `webpanel.sh`) instalam o comando **`axxon`** (`/usr/local/bin/axxon`, a partir do `axxon.sh` deste repositório). Ele lista todos os comandos de terminal do Axxon One da máquina, com a versão e o estado de cada parte (Server, Client, painel web e instalador), e os nomes dos seus aliases `axxon*` do `~/.bashrc`. As definições dos aliases não aparecem, porque podem conter senhas.
+
+```bash
+axxon            # ou axxon --help
 ```
 
 ## Versão instalada
@@ -54,8 +75,6 @@ O instalador evita isso:
 - `--language CULTURA` escolhe outro idioma (`en`, `es`, `pt-PT`...).
 - Perfis de usuário que já gravaram `C`/`POSIX` (`~/.local/share/AxxonSoft/AxxonOne/user.config`) são corrigidos, com backup. O Client desse usuário precisa estar fechado.
 
-No modo interativo, o próprio pacote Axxon pergunta domínio, portas e logs. O domínio pode ficar em branco e ser definido no Client na primeira conexão.
-
 ## Etapas
 
 | # | Etapa | O que faz |
@@ -73,19 +92,23 @@ No modo interativo, o próprio pacote Axxon pergunta domínio, portas e logs. O 
 | 11 | Serviço (Server) | habilita e aguarda o `axxon-one.service` ficar ativo |
 | 12 | Painel web (Server, opcional) | executa o `webpanel.sh` (veja abaixo) |
 
+Ao final, o instalador instala (ou atualiza) o comando `axxon`. Uma falha nessa parte só gera um aviso.
+
 ## Painel web (página exibida como câmera)
 
 O Client Linux do Axxon One **não tem o Web Board** ([limitação documentada pela AxxonSoft](https://docs.axxonsoft.com/confluence/spaces/ONE2025/pages/314539502/Features+and+potential+problems+with+Linux+OS)). O `webpanel.sh` contorna isso: um Google Chrome sem tela (Xvfb) abre a página, o ffmpeg transforma a tela em vídeo H.264 e o MediaMTX publica em RTSP **só em localhost**. A página é cadastrada no Axxon One Server como uma câmera (driver `FFMPEG / 1 channel device`, sem gravação) e vai para o layout como qualquer câmera.
 
 É só visualização: não dá para clicar nem rolar a página. Ela conta como um canal na licença do Axxon One.
 
-**Pelo instalador (Server):** no modo interativo ele pergunta se você quer o painel e pede a URL logo no início, testando a página antes de seguir (URL inválida é recusada e perguntada de novo). Com `-y`, use `--webpanel-url URL`.
+**Pelo instalador (Server):** no modo interativo ele pergunta se você quer o painel e pede a URL logo no início, testando a página antes de seguir (URL inválida é recusada e perguntada de novo). Com `-y`, use `--webpanel-url URL`. Se o painel já estiver instalado, o instalador mantém a página atual (mesmo que tenha sido trocada com `axxon-web`); só `--webpanel-url` a substitui.
 
 **Sozinho** (Server já instalado):
 
 ```bash
+wget https://raw.githubusercontent.com/SEESTEC/axxon_linux_install/main/webpanel.sh
 sudo bash webpanel.sh                       # pergunta a URL e testa
 sudo bash webpanel.sh install --url URL -y  # sem perguntas
+sudo bash webpanel.sh --help                # opções (--name, --rtsp-port, --allow-user...)
 ```
 
 O script:
@@ -97,8 +120,8 @@ O script:
 5. instala Xvfb, ffmpeg, fontes, Google Chrome (pacote oficial) e MediaMTX (versão fixa, **SHA-256 conferido**);
 6. cria o usuário de serviço `axxon_web`, os serviços `axxon-webpanel` e `axxon-webpanel-rtsp` (reinício automático, recarga da página a cada 6 h) e uma política do Chrome que desliga o tradutor e outros avisos;
 7. verifica o vídeo, cadastra a câmera (sem duplicar, se já existir) e confirma que o Axxon recebe a imagem;
-8. instala o comando `axxon-webpanel` e os aliases **`axxon-web`** e **`axxon-dashboard`** para todos os usuários (`/etc/bash.bashrc`);
-9. libera a troca de página **sem senha** para o grupo `axxonweb` (`/etc/sudoers.d/axxon-webpanel`, só `url`, `status` e `restart`). Entra no grupo quem rodou o `sudo`; outros usuários: `--allow-user USUARIO`. Vale a partir de um terminal novo.
+8. instala o comando `axxon-webpanel`, os aliases **`axxon-web`** e **`axxon-dashboard`** para todos os usuários (`/etc/bash.bashrc`) e o comando `axxon`;
+9. libera a troca de página **sem senha** para o grupo `axxonweb` (`/etc/sudoers.d/axxon-webpanel`, validado com `visudo`, só `url`, `status` e `restart`). Entra no grupo quem rodou o `sudo`; outros usuários: `--allow-user USUARIO` ou `sudo usermod -aG axxonweb USUARIO`. Vale a partir de um terminal novo. O `remove` continua exigindo senha.
 
 O painel roda como o usuário de sistema `axxon_web` (sem login, sem senha e sem shell): o navegador não roda como root e o painel funciona sem ninguém logado. Nenhum outro usuário é criado.
 
@@ -110,7 +133,7 @@ axxon-webpanel url URL       # direto
 axxon-webpanel status        # serviços, stream e câmera
 axxon-webpanel restart       # recarrega a página
 axxon-webpanel logs
-sudo axxon-webpanel remove   # remove o painel (e, se confirmado, a câmera)
+sudo axxon-webpanel remove   # remove o painel (e, se confirmado, a câmera; --keep-camera mantém)
 ```
 
 Resolução, fps, taxa de bits e intervalo de recarga ficam em `/etc/axxon-webpanel/webpanel.conf` (depois: `axxon-webpanel restart`). Log: `/var/log/axxon-webpanel.log`. Portas: RTSP `127.0.0.1:8654` (a `8554` é do próprio Axxon).
@@ -140,12 +163,15 @@ O instalador usa o repositório da [documentação oficial](https://docs.axxonso
 | "Outra execução do instalador já está em andamento" | Aguarde a outra execução terminar |
 | "não está disponível no repositório" | A versão instalada saiu do repositório: atualize tudo com `--version` (veja as versões listadas) |
 | Client não conecta ("Connection failed", `Culture name C is not supported` no log) | `sudo bash install.sh --client` com o Client fechado; no Client use o endereço `127.0.0.1` ou o nome do servidor, sem a porta 8000 (que é a do Web Client) |
-| Painel web sem imagem | `axxon-webpanel status` e `axxon-webpanel logs`; no Client, a câmera "Painel Web" deve estar sem gravação |
+| Painel web sem imagem | `axxon-webpanel status` (serviços e stream) e `axxon-webpanel logs`; `axxon-webpanel restart` recarrega a página |
+| `axxon-web` pede senha | Abra um terminal novo; se continuar, o usuário não está no grupo: `sudo usermod -aG axxonweb USUARIO` (ou `webpanel.sh install --allow-user USUARIO`) |
 | "localhost" na URL do painel não abre | No WSL, `localhost` é o Linux, não o Windows: use o IP do Windows ou da máquina |
 | Falha na etapa de download/apt update | Verifique internet/proxy/DNS e execute de novo |
 | Serviço não sobe | `sudo journalctl -u axxon-one -n 100` |
 | Reconfigurar o Server | `sudo dpkg-reconfigure axxon-one` |
-| Idioma/logs do Client | `sudo dpkg-reconfigure axxon-one-client` |
+| Idioma do Client | `sudo bash install.sh --client --language CULTURA` (com o Client fechado) |
+| Logs do Client | `sudo dpkg-reconfigure axxon-one-client` |
+| Não lembro um comando | `axxon --help` |
 
 ## Licença
 

@@ -14,6 +14,7 @@
 #   sudo bash install.sh --client --language en       # idioma do Client
 #   sudo bash install.sh --server --webpanel-url https://painel.local  # + painel web
 #   sudo bash install.sh --help          # todas as opções
+#   axxon --help                         # depois de instalado: todos os comandos de terminal
 #
 # A instalação é dividida em etapas com checkpoint. Se algo falhar (queda de
 # internet, falta de energia, Ctrl+C...), basta executar o script novamente:
@@ -59,6 +60,9 @@ readonly LOCK_FILE="/run/lock/axxon-install.lock"
 readonly WEBPANEL_CMD="/usr/local/bin/axxon-webpanel"
 readonly WEBPANEL_CONF="/etc/axxon-webpanel/webpanel.conf"
 readonly WEBPANEL_RAW_URL="https://raw.githubusercontent.com/SEESTEC/axxon_linux_install/main/webpanel.sh"
+readonly AXXON_CMD="/usr/local/bin/axxon"
+readonly AXXON_HELP_MARKER="Axxon One — comandos de terminal"
+readonly AXXON_HELP_RAW_URL="https://raw.githubusercontent.com/SEESTEC/axxon_linux_install/main/axxon.sh"
 
 readonly MIN_FREE_GB=5
 readonly SERVICE_TIMEOUT=180
@@ -125,6 +129,8 @@ Uso: sudo bash $(basename "$0") [opções]
   --reset           Descarta o checkpoint e refaz todas as etapas
   --remove          Remove o Axxon One, o painel web, o repositório e o checkpoint
   -h, --help        Mostra esta ajuda
+
+Depois de instalado, "axxon --help" lista todos os comandos de terminal.
 
 Sem --server/--client, um menu pergunta o que instalar.
 Log completo: $LOG_FILE
@@ -829,7 +835,15 @@ webpanel_script() {
 resolve_webpanel() {
     [[ "$TYPE" == "server" ]] || { WEBPANEL=""; return 0; }
     [[ -z "$WEBPANEL" ]] && WEBPANEL=$(st_get webpanel)
-    [[ -z "$WEBPANEL_URL" ]] && WEBPANEL_URL=$(st_get webpanel_url)
+    if [[ -z "$WEBPANEL_URL" ]]; then
+        if [[ -f "$WEBPANEL_CONF" ]]; then
+            # painel já instalado: a página atual vale (pode ter sido trocada com
+            # axxon-web); só --webpanel-url nesta execução a substitui
+            WEBPANEL_URL=""
+        else
+            WEBPANEL_URL=$(st_get webpanel_url)   # retomada de uma instalação
+        fi
+    fi
     if [[ -z "$WEBPANEL" ]]; then
         if [[ -f "$WEBPANEL_CONF" ]]; then
             WEBPANEL="yes"          # já instalado: só revalida
@@ -888,6 +902,29 @@ do_webpanel() {
 }
 chk_webpanel() {
     [[ -x "$WEBPANEL_CMD" ]] && "$WEBPANEL_CMD" status -q >/dev/null 2>&1
+}
+
+# Comando "axxon" (lista todos os comandos de terminal): axxon.sh do repositório,
+# a cópia ao lado deste script ou baixada do GitHub. Falha aqui não é fatal.
+install_axxon_help() {
+    local dir tmp
+    dir=$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo .)")
+    tmp=$(mktemp)
+    if [[ -f "$dir/axxon.sh" ]] && grep -q "$AXXON_HELP_MARKER" "$dir/axxon.sh"; then
+        cp "$dir/axxon.sh" "$tmp"
+    elif [[ -f "$AXXON_CMD" ]] && grep -q "$AXXON_HELP_MARKER" "$AXXON_CMD"; then
+        rm -f "$tmp"; return 0            # já instalado e sem cópia mais nova à mão
+    elif ! wget -q -T 30 -O "$tmp" "$AXXON_HELP_RAW_URL" 2>/dev/null; then
+        rm -f "$tmp"; warn "Não foi possível obter o axxon.sh (comando axxon não instalado)."; return 1
+    fi
+    if ! grep -q "$AXXON_HELP_MARKER" "$tmp" || ! bash -n "$tmp"; then
+        rm -f "$tmp"; warn "axxon.sh inválido — comando axxon não instalado."; return 1
+    fi
+    if [[ -e "$AXXON_CMD" ]] && ! grep -q "$AXXON_HELP_MARKER" "$AXXON_CMD"; then
+        rm -f "$tmp"; warn "Já existe outro comando $AXXON_CMD — não substituído."; return 1
+    fi
+    install -m 0755 "$tmp" "$AXXON_CMD"
+    rm -f "$tmp"
 }
 
 # ── execução das etapas ───────────────────────────────────────────────────────
@@ -1044,6 +1081,7 @@ do_remove() {
         run "${APT[@]}" purge $pkgs || die "Falha ao remover os pacotes (veja $LOG_FILE)."
     fi
     rm -f "$SOURCES_FILE" "$PREFS_FILE" "$MONO_PREFS_FILE" "$KEYRING"
+    [[ -f "$AXXON_CMD" ]] && grep -q "$AXXON_HELP_MARKER" "$AXXON_CMD" && rm -f "$AXXON_CMD"
     st_clear
     run "${APT[@]}" update >/dev/null || true
     ok "Axxon One removido."
@@ -1078,6 +1116,7 @@ summary() {
         printf '  Logs     : sudo dpkg-reconfigure axxon-one-client\n'
         printf '  O Client deve ter a mesma versão do Server ao qual se conecta.\n'
     fi
+    [[ -x "$AXXON_CMD" ]] && printf '  Ajuda    : axxon --help (todos os comandos de terminal)\n'
     printf '  Log      : %s\n\n' "$LOG_FILE"
 }
 
@@ -1104,6 +1143,7 @@ main() {
 
     info "Instalando Axxon One ${TYPE^^} — Ubuntu $(. /etc/os-release && echo "$VERSION_ID")"
     run_steps
+    install_axxon_help && ok "Comando axxon instalado: axxon --help lista todos os comandos"
 
     st_set completed "yes"
     st_set completed_at "$(date '+%F %T')"

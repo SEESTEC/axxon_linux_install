@@ -14,6 +14,11 @@
 #   axxon-webpanel url [URL]                   # troca a URL (aliases: axxon-web, axxon-dashboard)
 #   axxon-webpanel status | restart | logs | remove
 #   axxon-webpanel --help
+#   axxon --help                               # todos os comandos de terminal do Axxon One
+#
+# A troca de página não pede senha para o grupo axxonweb (quem rodou o sudo na
+# instalação; outros: --allow-user USUARIO). O painel roda como o usuário de
+# sistema axxon_web.
 #
 # Requisitos: Ubuntu 24.04+ (amd64), Axxon One Server instalado nesta máquina.
 
@@ -52,6 +57,9 @@ readonly SUDOERS_FILE="/etc/sudoers.d/axxon-webpanel"
 readonly BACKUP_DIR="/var/lib/axxon-webpanel-backup"
 readonly LOG_FILE="/var/log/axxon-webpanel.log"
 readonly LOCK_FILE="/run/lock/axxon-webpanel.lock"
+readonly AXXON_CMD="/usr/local/bin/axxon"
+readonly AXXON_HELP_MARKER="Axxon One — comandos de terminal"
+readonly AXXON_HELP_RAW_URL="https://raw.githubusercontent.com/SEESTEC/axxon_linux_install/main/axxon.sh"
 readonly MARKER="Painel web do Axxon One"
 
 readonly AXXON_HOME="/opt/AxxonSoft/AxxonOne"
@@ -135,6 +143,7 @@ Credenciais do Axxon One (para cadastrar a câmera): o script tenta root/root e,
 se não funcionar, pergunta. Para automação: AXXON_USER e AXXON_PASSWORD.
 Nada é gravado em disco.
 
+"axxon --help" lista todos os comandos de terminal do Axxon One.
 Log: $LOG_FILE
 EOF
 }
@@ -739,6 +748,7 @@ $ALIAS_END
 EOF
     fi
     ok "Comando $CMD_PATH e aliases axxon-web / axxon-dashboard ($BASHRC)"
+    install_axxon_help && ok "Comando axxon: axxon --help lista todos os comandos"
 }
 
 # sudoers: o grupo pode rodar só url/status/restart sem senha. O script recusa
@@ -782,6 +792,29 @@ remove_aliases() {
     tmp=$(mktemp)
     awk -v b="$ALIAS_BEGIN" -v e="$ALIAS_END" '$0==b{skip=1} !skip{print} $0==e{skip=0}' "$BASHRC" > "$tmp" &&
         cat "$tmp" > "$BASHRC"
+    rm -f "$tmp"
+}
+
+# Comando "axxon" (lista todos os comandos de terminal): axxon.sh do repositório,
+# a cópia ao lado deste script ou baixada do GitHub. Falha aqui não é fatal.
+install_axxon_help() {
+    local dir tmp
+    dir=$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo .)")
+    tmp=$(mktemp)
+    if [[ -f "$dir/axxon.sh" ]] && grep -q "$AXXON_HELP_MARKER" "$dir/axxon.sh"; then
+        cp "$dir/axxon.sh" "$tmp"
+    elif [[ -f "$AXXON_CMD" ]] && grep -q "$AXXON_HELP_MARKER" "$AXXON_CMD"; then
+        rm -f "$tmp"; return 0            # já instalado e sem cópia mais nova à mão
+    elif ! curl -fsSL --retry 2 -m 30 -o "$tmp" "$AXXON_HELP_RAW_URL" 2>/dev/null; then
+        rm -f "$tmp"; warn "Não foi possível obter o axxon.sh (comando axxon não instalado)."; return 1
+    fi
+    if ! grep -q "$AXXON_HELP_MARKER" "$tmp" || ! bash -n "$tmp"; then
+        rm -f "$tmp"; warn "axxon.sh inválido — comando axxon não instalado."; return 1
+    fi
+    if [[ -e "$AXXON_CMD" ]] && ! grep -q "$AXXON_HELP_MARKER" "$AXXON_CMD"; then
+        rm -f "$tmp"; warn "Já existe outro comando $AXXON_CMD — não substituído."; return 1
+    fi
+    install -m 0755 "$tmp" "$AXXON_CMD"
     rm -f "$tmp"
 }
 
@@ -961,6 +994,11 @@ cmd_remove() {
     systemctl reset-failed "$SVC_PANEL" "$SVC_RTSP" >/dev/null 2>&1 || true
     remove_aliases
     rm -f "$SUDOERS_FILE" "$CMD_PATH"
+    # o comando axxon fica se ainda houver Server ou Client (é do install.sh também)
+    if ! pkg_installed axxon-one && ! pkg_installed axxon-one-client &&
+       [[ -f "$AXXON_CMD" ]] && grep -q "$AXXON_HELP_MARKER" "$AXXON_CMD"; then
+        rm -f "$AXXON_CMD"
+    fi
     getent group "$WEB_GROUP" >/dev/null && groupdel "$WEB_GROUP" 2>/dev/null
     ok "Painel web removido (backup da configuração em $BACKUP_DIR)"
 }
@@ -974,6 +1012,7 @@ summary() {
     printf '  Câmera   : "%s" — arraste-a para uma célula do layout no Client\n' "$(conf_get CAMERA_NAME)"
     printf '  Trocar   : axxon-web  (ou axxon-dashboard) — abra um terminal novo para os aliases\n'
     printf '  Estado   : axxon-webpanel status | restart | logs\n'
+    printf '  Ajuda    : axxon --help (todos os comandos de terminal)\n'
     printf '  Ajustes  : %s (resolução, fps, recarga)\n' "$CONF"
     printf '  Log      : %s\n\n' "$LOG_FILE"
 }
