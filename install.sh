@@ -10,6 +10,7 @@
 #   sudo bash install.sh --server        # instala o Axxon One Server
 #   sudo bash install.sh --client        # instala o Axxon One Client
 #   sudo bash install.sh --server -y     # sem perguntas (valores padrão)
+#   sudo bash install.sh --client --version 3.1.0.8   # versão específica
 #   sudo bash install.sh --help          # todas as opções
 #
 # A instalação é dividida em etapas com checkpoint. Se algo falhar (queda de
@@ -24,7 +25,7 @@ fi
 set -uo pipefail
 
 # ── constantes ────────────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.1.0"
 readonly MIN_UBUNTU="24.04"
 
 readonly REPO_URL="https://download.axxonsoft.com/debian-repository"
@@ -33,8 +34,11 @@ readonly KEY_URL="$REPO_URL/info@axxonsoft.com.gpg.key"
 readonly KEYRING="/etc/apt/keyrings/axxonsoft.gpg"
 readonly SOURCES_FILE="/etc/apt/sources.list.d/axxonsoft.list"
 readonly PREFS_FILE="/etc/apt/preferences.d/axxonsoft"
+readonly MONO_PREFS_FILE="/etc/apt/preferences.d/axxonsoft-mono"
 readonly LEGACY_KEY="/etc/apt/trusted.gpg.d/axxonsoft.gpg"
-readonly MONO_VERSION="6.4.0.198-0xamarin3+debian9b1"
+# Pacotes principais: Server e Client compartilham o axxon-one-core, logo
+# precisam estar sempre na mesma versão
+readonly -a MAIN_PKGS=(axxon-one axxon-one-client)
 
 readonly STATE_DIR="/var/lib/axxon-install"
 readonly STATE_FILE="$STATE_DIR/state"
@@ -56,6 +60,7 @@ readonly -a APT=(apt-get -y
 TYPE=""          # server | client
 ASSUME_YES=false # -y: sem perguntas, debconf com valores padrão
 DOMAIN=""        # domínio do Axxon One Server (opcional)
+VERSION=""       # versão do Axxon One (vazio: a instalada ou a mais recente)
 RESET=false
 REMOVE=false
 
@@ -92,6 +97,9 @@ Uso: sudo bash $(basename "$0") [opções]
   --client          Instala o Axxon One Client (pacote axxon-one-client)
   -y, --yes         Não faz perguntas; o debconf usa os valores padrão
   --domain NOME     Domínio do Axxon One Server (pode ficar em branco)
+  --version VER     Versão do Axxon One (padrão: a já instalada nesta máquina;
+                    se não houver nenhuma, a mais recente). Uma versão diferente
+                    da instalada atualiza Server e Client juntos.
   --reset           Descarta o checkpoint e refaz todas as etapas
   --remove          Remove o Axxon One, o repositório e o checkpoint
   -h, --help        Mostra esta ajuda
@@ -110,6 +118,9 @@ parse_args() {
             --domain)   [[ $# -ge 2 ]] || die "--domain exige um valor."
                         DOMAIN="$2"; shift ;;
             --domain=*) DOMAIN="${1#*=}" ;;
+            --version)  [[ $# -ge 2 ]] || die "--version exige um valor."
+                        VERSION="$2"; shift ;;
+            --version=*) VERSION="${1#*=}" ;;
             --reset)    RESET=true ;;
             --remove)   REMOVE=true ;;
             -h|--help)  usage; exit 0 ;;
@@ -282,6 +293,7 @@ STEPS_COMMON=(
     "key|Chave GPG do repositório Axxon|do_key|chk_key"
     "sources|Repositório Axxon e prioridades do apt|do_sources|chk_sources"
     "update|Atualização da lista de pacotes|do_update|chk_update"
+    "version|Versão do Axxon One e dependências|do_version|chk_version"
     "download|Download dos pacotes|do_download|chk_download"
     "install|Instalação do Axxon One|do_install|chk_install"
 )
@@ -377,10 +389,11 @@ chk_key() { [[ -s "$KEYRING" ]] && gpg --batch --quiet --show-keys "$KEYRING" >/
 
 # sources — além dos componentes da documentação (stable main e stretch
 # backports/main), o Ubuntu 24.04 precisa de:
-#   • buster backports/main → libicu63, exigida pelo axxon-one-core
-#   • stretch backports/mono-6_4 → mono 6.4, versão exata exigida pelo client
+#   • buster backports/main → libicu63 (axxon-one-core) e mono 6.12 (client 3.2+)
+#   • stretch backports/mono-6_4 → mono 6.4, versão exata exigida pelo client 3.1
 # As prioridades evitam que pacotes Debian do repositório Axxon substituam os
-# do Ubuntu: só pacotes axxon-* (e o mono 6.4, no client) têm preferência.
+# do Ubuntu: só pacotes axxon-* têm preferência. O mono exato exigido pelo
+# client é fixado à parte, na etapa "version" ($MONO_PREFS_FILE).
 expected_sources() {
     local opt="[signed-by=$KEYRING]"
     cat <<EOF
@@ -401,14 +414,6 @@ Package: axxon-* aksusbd
 Pin: origin "$REPO_HOST"
 Pin-Priority: 500
 EOF
-    if [[ "$TYPE" == "client" ]]; then
-        cat <<EOF
-
-Package: /mono/ ca-certificates-mono
-Pin: version $MONO_VERSION
-Pin-Priority: 1001
-EOF
-    fi
 }
 do_sources() {
     expected_sources > "$SOURCES_FILE.tmp" && mv -f "$SOURCES_FILE.tmp" "$SOURCES_FILE" &&
@@ -442,16 +447,177 @@ chk_update() {
     [[ -n "$cand" && "$cand" != "(none)" ]]
 }
 
+# version — escolhe a versão e monta a lista exata de pacotes a instalar.
+#
+# Server e Client dependem do mesmo axxon-one-core com versão exata. Instalar
+# o pacote sem versão traria a mais recente do repositório e atualizaria o core
+# do outro componente já instalado (ou o removeria). Por isso:
+#   • --version informado → essa versão;
+#   • axxon-one-core instalado → a mesma versão dele;
+#   • nada instalado → a mais recente.
+# Os pacotes principais já instalados entram na lista na mesma versão, de modo
+# que uma troca de versão atualiza Server e Client juntos.
+installed_version() {
+    pkg_installed "$1" || return 1
+    dpkg-query -W -f='${Version}' "$1" 2>/dev/null
+}
+
+resolve_version() {
+    local v
+    if [[ -n "$VERSION" ]]; then
+        printf '%s\n' "$VERSION"
+    elif v=$(installed_version axxon-one-core) && [[ -n "$v" ]]; then
+        printf '%s\n' "$v"
+    else
+        apt-cache policy "$(package_name)" 2>/dev/null | awk '/Candidate:/ {print $2}'
+    fi
+}
+
+# Campo Depends/Pre-Depends de PACOTE=VERSÃO, uma dependência por linha
+pkg_depends() {
+    apt-cache show "$1=$2" 2>/dev/null |
+        awk '/^$/ {exit} /^(Pre-)?Depends:/ {sub(/^[^:]*: */, ""); print}' |
+        tr ',' '\n' | sed -E 's/^ +//; s/ *\|.*//'
+}
+
+# Pacotes principais a instalar: o escolhido + os já instalados
+target_mains() {
+    local p
+    printf '%s\n' "$(package_name)"
+    for p in "${MAIN_PKGS[@]}"; do
+        [[ "$p" != "$(package_name)" ]] && pkg_installed "$p" && printf '%s\n' "$p"
+    done
+    return 0
+}
+
+# Fecho das dependências axxon-* com versão exata (= VERSÃO)
+pkg_closure() {
+    local v="$1" p d
+    local -a queue
+    local -A seen=()
+    mapfile -t queue < <(target_mains)
+    while ((${#queue[@]})); do
+        p="${queue[0]}"; queue=("${queue[@]:1}")
+        [[ -n "${seen[$p]:-}" ]] && continue
+        seen[$p]=1
+        printf '%s\n' "$p"
+        while read -r d; do
+            [[ -n "$d" && -z "${seen[$d]:-}" ]] && queue+=("$d")
+        done < <(pkg_depends "$p" "$v" | awk -v v="$v" '$1 ~ /^axxon-/ && $2 == "(=" && $3 == v ")" {print $1}')
+    done
+}
+
+# Versão exata do mono exigida pelo client (vazio se não houver client)
+mono_version_for() {
+    local v="$1" p
+    for p in $(st_get specs_pkgs); do
+        pkg_depends "$p" "$v" | awk '$1 == "mono-runtime" && $2 == "(=" {sub(/\)$/, "", $3); print $3; exit}'
+    done | head -n1
+}
+
+expected_mono_prefs() {
+    cat <<EOF
+# Gerenciado pelo instalador Axxon One (SEESTEC) — não edite manualmente
+# Versão exata do mono exigida pelo Axxon One Client $2
+Package: /mono/ ca-certificates-mono
+Pin: version $1
+Pin-Priority: 1001
+EOF
+}
+
+do_version() {
+    local v cur p mono sim
+    local -a pkgs specs
+    v=$(resolve_version)
+    if [[ -z "$v" || "$v" == "(none)" ]]; then
+        err "Não foi possível determinar a versão do Axxon One a instalar."; return 1
+    fi
+    if ! apt-cache show "$(package_name)=$v" >/dev/null 2>&1; then
+        err "$(package_name) $v não está disponível no repositório Axxon."
+        printf '      Versões disponíveis: %s\n' \
+            "$(apt-cache madison "$(package_name)" | awk '{print $3}' | xargs)" >&2
+        cur=$(installed_version axxon-one-core || true)
+        [[ -n "$cur" && -z "$VERSION" ]] &&
+            printf '      O Axxon One %s já instalado define a versão. Para atualizar tudo junto, use --version.\n' "$cur" >&2
+        return 1
+    fi
+
+    cur=$(installed_version axxon-one-core || true)
+    if [[ -n "$cur" && "$cur" != "$v" ]]; then
+        warn "Axxon One instalado: $cur — versão escolhida: $v."
+        warn "Pacotes que serão trocados de versão: $(target_mains | xargs)"
+        confirm "Trocar a versão do Axxon One instalado para $v?" N || return 1
+    fi
+
+    mapfile -t pkgs < <(pkg_closure "$v")
+    specs=()
+    for p in "${pkgs[@]}"; do specs+=("$p=$v"); done
+    st_set specs_pkgs "${pkgs[*]}"
+
+    # mono: fixa a versão exata exigida pelo client (se ele fizer parte da instalação)
+    mono=$(mono_version_for "$v")
+    if [[ -n "$mono" ]]; then
+        expected_mono_prefs "$mono" "$v" > "$MONO_PREFS_FILE.tmp" &&
+            mv -f "$MONO_PREFS_FILE.tmp" "$MONO_PREFS_FILE" && chmod 0644 "$MONO_PREFS_FILE" || return 1
+        info "  mono fixado em $mono ($MONO_PREFS_FILE)"
+    fi
+
+    # Simulação: nenhum pacote axxon pode ser removido ou mudar de versão fora do plano
+    if ! sim=$(apt-get -s install "${specs[@]}" 2>&1); then
+        printf '%s\n' "$sim" | tail -n 30 >&2
+        err "O apt não consegue resolver a instalação de: ${specs[*]}"; return 1
+    fi
+    _log "simulação: $(printf '%s\n' "$sim" | grep -E '^(Inst|Remv)' | grep -c .) operações"
+    if printf '%s\n' "$sim" | grep -E '^Remv axxon-'; then
+        err "A instalação removeria pacotes Axxon (acima). Operação cancelada."; return 1
+    fi
+    # "Inst PACOTE [atual] (nova ...)": um pacote axxon já instalado só pode ir
+    # para a versão escolhida. Novos sem versão casada (drivers/detector pack) são aceitos.
+    local name newv extra=""
+    while read -r name newv; do
+        [[ "$newv" == "$v" ]] && continue
+        pkg_installed "$name" && extra+=" $name→$newv"
+    done < <(printf '%s\n' "$sim" | sed -nE 's/^Inst (axxon-[^ ]+) .*\(([^ ]+) .*/\1 \2/p')
+    if [[ -n "$extra" ]]; then
+        err "A instalação alteraria pacotes Axxon fora do plano:$extra"; return 1
+    fi
+
+    st_set version "$v"
+    st_set specs "${specs[*]}"
+    info "  Versão: $v — pacotes: ${specs[*]}"
+}
+chk_version() {
+    local v mono
+    v=$(st_get version)
+    [[ -n "$v" && "$v" == "$(resolve_version)" && -n "$(st_get specs)" ]] || return 1
+    # Lista ainda corresponde aos pacotes principais instalados
+    local p
+    for p in $(target_mains); do
+        [[ " $(st_get specs_pkgs) " == *" $p "* ]] || return 1
+    done
+    mono=$(mono_version_for "$v")
+    [[ -z "$mono" ]] || [[ "$(cat "$MONO_PREFS_FILE" 2>/dev/null)" == "$(expected_mono_prefs "$mono" "$v")" ]]
+}
+
+# Lista "pacote=versão" definida na etapa "version"
+pkg_specs() { st_get specs; }
+
 # download — baixa tudo antes de instalar; se a conexão cair, o apt reaproveita
 # os arquivos já baixados (inclusive parciais) na próxima execução
 do_download() {
     export DEBIAN_FRONTEND=noninteractive
-    retry 5 20 run "${APT[@]}" install --download-only "$(package_name)"
+    local -a specs
+    read -ra specs <<<"$(pkg_specs)"
+    ((${#specs[@]})) || return 1
+    retry 5 20 run "${APT[@]}" install --download-only "${specs[@]}"
 }
 # Concluído quando não resta nenhum .deb a baixar (ou o pacote já está instalado)
 chk_download() {
     local uris
-    uris=$(apt-get -qq --print-uris install "$(package_name)" 2>/dev/null) || return 1
+    local -a specs
+    read -ra specs <<<"$(pkg_specs)"
+    ((${#specs[@]})) || return 1
+    uris=$(apt-get -qq --print-uris install "${specs[@]}" 2>/dev/null) || return 1
     [[ -z "$uris" ]]
 }
 
@@ -461,12 +627,13 @@ preseed_debconf() {
     printf 'axxon-one axxon-one/domain string %s\n' "$DOMAIN" | debconf-set-selections
 }
 do_install() {
-    local pkg
-    pkg=$(package_name)
+    local -a specs
+    read -ra specs <<<"$(pkg_specs)"
+    ((${#specs[@]})) || return 1
     preseed_debconf || return 1
     if $ASSUME_YES || ! has_tty; then
         export DEBIAN_FRONTEND=noninteractive
-        retry 2 10 run "${APT[@]}" install "$pkg" || return 1
+        retry 2 10 run "${APT[@]}" install "${specs[@]}" || return 1
     else
         echo
         info "O instalador do Axxon One fará algumas perguntas de configuração."
@@ -475,13 +642,19 @@ do_install() {
             info "O domínio pode ficar em branco e ser definido no Client na primeira conexão."
         echo
         unset DEBIAN_FRONTEND
-        run_tty "${APT[@]}" install "$pkg" || return 1
+        run_tty "${APT[@]}" install "${specs[@]}" || return 1
     fi
     export DEBIAN_FRONTEND=noninteractive
     chk_install
 }
 chk_install() {
-    pkg_installed "$(package_name)" && [[ -z "$(dpkg --audit 2>/dev/null)" ]]
+    local v p
+    v=$(st_get version)
+    [[ -n "$v" ]] || return 1
+    for p in $(st_get specs_pkgs); do
+        [[ "$(installed_version "$p")" == "$v" ]] || return 1
+    done
+    [[ -z "$(dpkg --audit 2>/dev/null)" ]]
 }
 
 # service (server)
@@ -623,6 +796,12 @@ resolve_state() {
 
     st_set type "$TYPE"
     st_set completed "no"
+    # --version vale também para as retomadas seguintes
+    if [[ -n "$VERSION" ]]; then
+        st_set requested_version "$VERSION"
+    else
+        VERSION=$(st_get requested_version)
+    fi
     steps_for_type
 }
 
@@ -633,7 +812,7 @@ do_remove() {
         awk '$1 != "not-installed" {print $2}' | xargs || true)
     echo
     info "Serão removidos: ${pkgs:-(nenhum pacote axxon instalado)}"
-    info "Também: $SOURCES_FILE, $PREFS_FILE, $KEYRING e o checkpoint."
+    info "Também: $SOURCES_FILE, $PREFS_FILE, $MONO_PREFS_FILE, $KEYRING e o checkpoint."
     confirm "Confirma a remoção?" N || exit 0
     export DEBIAN_FRONTEND=noninteractive
     if [[ -n "$pkgs" ]]; then
@@ -641,7 +820,7 @@ do_remove() {
         # shellcheck disable=SC2086
         run "${APT[@]}" purge $pkgs || die "Falha ao remover os pacotes (veja $LOG_FILE)."
     fi
-    rm -f "$SOURCES_FILE" "$PREFS_FILE" "$KEYRING"
+    rm -f "$SOURCES_FILE" "$PREFS_FILE" "$MONO_PREFS_FILE" "$KEYRING"
     st_clear
     run "${APT[@]}" update >/dev/null || true
     ok "Axxon One removido."
