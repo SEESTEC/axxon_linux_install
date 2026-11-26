@@ -411,7 +411,7 @@ check_axxon() {
             "Atualize: sudo apt-get install --only-upgrade axxon-drivers-pack"
     fi
     info "  Driver pack: $dp ($(basename "$(dirname "$rep")")) — driver $CAM_VENDOR / \"$CAM_MODEL\" disponível"
-    dp_cand=$(apt-cache policy axxon-drivers-pack 2>/dev/null | awk '/Candidate:/ {print $2}')
+    dp_cand=$(LC_ALL=C apt-cache policy axxon-drivers-pack 2>/dev/null | awk '/Candidate:/ {print $2}')
     if [[ -n "$dp_cand" && "$dp_cand" != "(none)" && "$dp_cand" != "$dp" ]] &&
        dpkg --compare-versions "$dp_cand" gt "$dp"; then
         warn "Há um driver pack mais novo ($dp_cand). Opcional: sudo apt-get install --only-upgrade axxon-drivers-pack"

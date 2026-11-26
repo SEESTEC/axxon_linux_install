@@ -470,7 +470,7 @@ do_update() {
     export DEBIAN_FRONTEND=noninteractive
     local out
     out=$(mktemp)
-    if ! retry 3 20 run "${APT[@]}" update > "$out"; then
+    if ! retry 3 20 run env LC_ALL=C "${APT[@]}" update > "$out"; then
         cat "$out"; rm -f "$out"; return 1
     fi
     cat "$out"
@@ -482,7 +482,7 @@ do_update() {
 }
 chk_update() {
     local cand
-    cand=$(apt-cache policy "$(package_name)" 2>/dev/null | awk '/Candidate:/ {print $2}')
+    cand=$(LC_ALL=C apt-cache policy "$(package_name)" 2>/dev/null | awk '/Candidate:/ {print $2}')
     [[ -n "$cand" && "$cand" != "(none)" ]]
 }
 
@@ -508,7 +508,7 @@ resolve_version() {
     elif v=$(installed_version axxon-one-core) && [[ -n "$v" ]]; then
         printf '%s\n' "$v"
     else
-        apt-cache policy "$(package_name)" 2>/dev/null | awk '/Candidate:/ {print $2}'
+        LC_ALL=C apt-cache policy "$(package_name)" 2>/dev/null | awk '/Candidate:/ {print $2}'
     fi
 }
 
@@ -602,7 +602,7 @@ do_version() {
     fi
 
     # Simulação: nenhum pacote axxon pode ser removido ou mudar de versão fora do plano
-    if ! sim=$(apt-get -s install "${specs[@]}" 2>&1); then
+    if ! sim=$(LC_ALL=C apt-get -s install "${specs[@]}" 2>&1); then
         printf '%s\n' "$sim" | tail -n 30 >&2
         err "O apt não consegue resolver a instalação de: ${specs[*]}"; return 1
     fi
